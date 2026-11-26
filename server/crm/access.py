@@ -23,6 +23,9 @@ class Principal:
     access_model: int = 1
     policy_revision: int = 0
     grant_id: str | None = None
+    account_bound: bool = False
+    registered_manager: bool = False
+    recover_legacy_receipt: bool = False
 
     @property
     def owner(self):
@@ -34,6 +37,13 @@ def require(principal, capability):
         raise CRMError("Недостаточно прав для действия.", "forbidden", 403)
 
 
+def registered_manager_staff(conn, principal):
+    return frozenset(row[0] for row in conn.execute(
+        'SELECT employee_uuid FROM crm_registry.registered_manager_scope WHERE actor_uid=?',
+        (principal.actor_uid,),
+    )) | {principal.employee_uuid}
+
+
 def refresh_write(conn, principal):
     """Recheck the persistent identity/membership inside the write transaction.
 
@@ -42,6 +52,9 @@ def refresh_write(conn, principal):
     maintenance takes its exclusive side. Plain reads preserve the app role's
     SELECT-only access to identity tables (row locking would require UPDATE).
     """
+    from . import grants
+    if grants.model(conn, principal.actor_uid) != principal.access_model:
+        raise CRMError('Изменилась модель доступа. Операция сохранена.', 'grant_changed', 409)
     if principal.owner and principal.access_model != 2:return principal
     link=conn.execute('SELECT l.employee_uuid FROM crm_actor_links l JOIN crm_employees e USING(employee_uuid) '
                       'WHERE l.actor_uid=? AND l.active=1 AND e.active=1',(principal.actor_uid,)).fetchone()
@@ -52,7 +65,6 @@ def refresh_write(conn, principal):
     if not link or link[0]!=principal.employee_uuid or not member or member['team_id']!=principal.team_id:
         raise CRMError('Изменился действующий вход или кадровый доступ.','scope_changed',403)
     if principal.access_model == 2:
-        from . import grants
         member_caps = frozenset(json.loads(member['capabilities_json']))
         legacy = replace(principal,
                          capabilities=(principal.capabilities - {'access_manage', 'logistics'}) | (member_caps & {'access_manage', 'logistics'}),

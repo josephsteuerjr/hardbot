@@ -72,6 +72,16 @@ async function request(path:string,body?:unknown,credential?:Account){
   return result;
 }
 export async function accountAction(action:string,input:any){
+  if(action==='account-registration-options')return {ok:true,data:await request('/api/account/crm-registration')};
+  if(action==='account-register'){
+    const username=String(input.username||'').trim().toLowerCase();
+    const employee=String(input.employee||'').trim().replace(/\s+/g,' ');
+    const password=String(input.password||'');
+    const pc_proof=await pcLoginProof(PRIMARY,username,password,employee);
+    const data=await request('/api/account/crm-registration',{role:input.role,employee,username,password,
+      country:input.country,city:input.city,code:input.code,pc_proof,audience:'crm-desktop'});
+    return {ok:true,data};
+  }
   const mine=++generation;
   const current=()=>{if(mine!==generation)throw new Error('Вход изменён. Повторите действие.');};
   if(action==='account-login'){

@@ -43,7 +43,8 @@ def readiness(conn, principal):
     enabled = bool(mode and (mode[0] == 'isolated' or mode[0] == 'cutover' and primary_fence.ready(conn)))
     managed = conn.execute('SELECT 1 FROM crm_distribution_managers WHERE employee_uuid=?',
                            (principal.employee_uuid,)).fetchone()
-    permitted = principal.role in {'manager', 'owner'} and (principal.owner or 'assign' in principal.capabilities) and bool(managed)
+    permitted = principal.role in {'manager', 'owner'} and (principal.owner or 'assign' in principal.capabilities) and (
+        bool(managed) or _registered_distribution(principal))
     return dict(enabled=enabled and permitted, environment=mode[0] if enabled else 'mixed',
                 reason='' if enabled and permitted else
                 'Распределение в рабочем смешанном контуре выключено: защита старых писателей ещё не подтверждена.' if not enabled else
@@ -79,7 +80,41 @@ def _territory_sql(principal, *, managed='mc', manager='dm'):
             [*sorted(principal.employee_scope), at, at])
 
 
+def _registered_distribution(principal):
+    return (principal.registered_manager and principal.role == 'manager'
+            and principal.access_model == 2 and 'assign' in principal.capabilities
+            and bool(principal.employee_scope - {principal.employee_uuid}))
+
+
+def _registered_slots(principal, contract, work=None, *, unassigned=False, team=None):
+    staff = sorted(principal.employee_scope - {principal.employee_uuid})
+    works = sorted(WORK & principal.capabilities & ({work} if work else WORK))
+    if not staff or not works:
+        return '1=0', []
+    at = now()
+    who = ','.join('?' for _ in staff)
+    kinds = ','.join('?' for _ in works)
+    clauses, args = [], []
+    sources = [('crm_assignment_heads', 'baseline_employee_uuid', 'employee_uuid IS NULL')]
+    if not unassigned:
+        sources.insert(0, ('crm_effective_assignments', 'employee_uuid',
+                           'starts_at<=? AND (ends_at IS NULL OR ends_at>?)'))
+    for table, employee, state in sources:
+        membership = (' AND EXISTS(SELECT 1 FROM crm_memberships tm WHERE tm.employee_uuid=s.' + employee
+                      + ' AND tm.team_id=? AND tm.starts_at<=? AND (tm.ends_at IS NULL OR tm.ends_at>?))') if team else ''
+        clauses.append(f'EXISTS(SELECT 1 FROM {table} s WHERE s.contract_uuid={contract}'
+                       f' AND s.capability IN ({kinds}) AND s.{employee} IN ({who}) AND {state}{membership})')
+        args.extend([*works, *staff])
+        if table == 'crm_effective_assignments':
+            args.extend([at, at])
+        if team:
+            args.extend([team, at, at])
+    return '(' + ' OR '.join(clauses) + ')', args
+
+
 def scope_sql(principal, alias='c', work=None):
+    if _registered_distribution(principal):
+        return _registered_slots(principal, alias + '.contract_uuid', work)
     clause = ('EXISTS(SELECT 1 FROM crm_managed_contracts mc '
               'JOIN crm_distribution_managers dm ON dm.team_id=mc.team_id AND dm.capability=mc.capability '
               'WHERE dm.employee_uuid=? AND mc.contract_uuid=' + alias + '.contract_uuid')
@@ -94,6 +129,14 @@ def allowed_slots(conn, principal, ids):
     if not ids:
         return set()
     placeholders = ','.join('?' for _ in ids)
+    if _registered_distribution(principal):
+        result = set()
+        for work in sorted(WORK & principal.capabilities):
+            clause, args = _registered_slots(principal, 'c.contract_uuid', work)
+            result.update((row[0], work) for row in conn.execute(
+                f'SELECT c.contract_uuid FROM crm_contracts c WHERE c.contract_uuid IN ({placeholders}) AND {clause}',
+                (*ids, *args)))
+        return result
     territory, territory_args = _territory_sql(principal)
     from .store import selected_grant
     works = sorted(WORK if selected_grant(principal) is None else WORK & principal.capabilities)
@@ -143,7 +186,9 @@ def targets(conn, principal):
                                       (principal.employee_uuid,))}
     from .store import selected_grant
     grant = selected_grant(principal)
-    if grant is not None and grant.territory == 'team':
+    if _registered_distribution(principal):
+        teams = None
+    elif grant is not None and grant.territory == 'team':
         teams &= {principal.team_id}
     result = {}
     rows = conn.execute('SELECT e.employee_uuid,e.name,e.staff_id,e.active,m.team_id,m.role,m.capabilities_json '
@@ -154,7 +199,7 @@ def targets(conn, principal):
         if authorized_staff is None or r['employee_uuid'] in authorized_staff:
             memberships[r['employee_uuid']].append(dict(r))
     for eid, members in memberships.items():
-        visible = [r for r in members if r['team_id'] in teams]
+        visible = [r for r in members if r['team_id'] and (teams is None or r['team_id'] in teams)]
         if not visible:
             continue
         row = visible[0]
@@ -195,7 +240,12 @@ def _filters(principal, *, search='', employee_uuid='', work='all', unassigned='
                        'AND a.employee_uuid=? AND a.ends_at IS NULL'+(' AND a.capability=?' if work!='all' else '')+')')
         args.append(employee_uuid)
         if work!='all':args.append(work)
-    if str(unassigned)=='1':
+    if str(unassigned)=='1' and _registered_distribution(principal):
+        unassigned_clause, unassigned_args = _registered_slots(principal, 'c.contract_uuid',
+            None if work=='all' else work, unassigned=True)
+        clauses.append(unassigned_clause)
+        args.extend(unassigned_args)
+    elif str(unassigned)=='1':
         territory, territory_args = _territory_sql(principal, managed='free', manager='dm')
         clauses.append('EXISTS(SELECT 1 FROM crm_managed_contracts free WHERE free.contract_uuid=c.contract_uuid '
             'AND EXISTS(SELECT 1 FROM crm_distribution_managers dm WHERE dm.employee_uuid=? AND dm.team_id=free.team_id AND dm.capability=free.capability) '
@@ -388,8 +438,16 @@ def _validate(conn, principal, frozen):
         team=members[0]['team_id'];target_slots=set()
         for start in range(0,len(ids),200):
             batch=ids[start:start+200]
-            target_slots.update((r[0],r[1]) for r in conn.execute('SELECT contract_uuid,capability FROM crm_managed_contracts '
-                'WHERE team_id=? AND contract_uuid IN ('+','.join('?' for _ in batch)+')',(team,*batch)))
+            marks = ','.join('?' for _ in batch)
+            if _registered_distribution(principal):
+                for work in works:
+                    clause, args = _registered_slots(principal, 'c.contract_uuid', work, team=team)
+                    target_slots.update((r[0],work) for r in conn.execute(
+                        f'SELECT c.contract_uuid FROM crm_contracts c WHERE c.contract_uuid IN ({marks}) AND {clause}',
+                        (*batch, *args)))
+            else:
+                target_slots.update((r[0],r[1]) for r in conn.execute('SELECT contract_uuid,capability FROM crm_managed_contracts '
+                    f'WHERE team_id=? AND contract_uuid IN ({marks})',(team,*batch)))
         if any((s['contract_uuid'],s['capability']) not in target_slots for s in slots):
             raise CRMError('Сотрудник не принадлежит управляемому портфелю.','target_unavailable',403)
     changed=[]

@@ -36,8 +36,12 @@ def identity(request, host):
         role, name = "analyst", device.get("device") or device.get("name") or ""
     if not device or not uid:
         raise host._json_error(web.HTTPUnauthorized, "crm_identity_required")
+    if device.get('account_id'):
+        import crm_registration
+        crm_registration.project_verified_account(uid)
     return {"ok": True, "subject": {"type": role, "actor_uid": uid},
-            "device": {"id": int(device["id"])}, "me": {"role": role, "name": name}}
+            "device": {"id": int(device["id"]), "account_bound": bool(device.get('account_id'))},
+            "me": {"role": role, "name": name}}
 
 
 def install(app, host):

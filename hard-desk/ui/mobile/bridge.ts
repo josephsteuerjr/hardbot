@@ -3,8 +3,9 @@ import {mountFieldOffline} from './field-offline';
 import {mountFieldWorkspace} from './field-workspace';
 import {mountConnection} from './connection';
 import {MobileActivity} from './activity';
+import {grantLabel} from '../workspace/grant-label';
 type Reply={ok:boolean;status:number;data?:any;text?:string;stale?:string;cancelled?:boolean;retryAt?:number};
-type Entry={action:string;body:any;queued_at:string;state:'pending'|'attention'|'accepted';result?:any;error?:string;code?:string;sha256?:string;grant_id?:string|null;actor_uid?:string|number;access_model?:number};
+type Entry={action:string;body:any;queued_at:string;state:'pending'|'attention'|'accepted';result?:any;error?:string;code?:string;sha256?:string;grant_id?:string|null;actor_uid?:string|number;access_model?:number;recover_legacy_receipt?:boolean};
 const listeners=new Set<(event:any)=>void>();
 const canonical=(v:any):string=>JSON.stringify(v,(_,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 const background=(work:Promise<any>)=>{void work.catch(()=>emit({type:'storage-error',text:'Не удалось сохранить данные на телефоне. Оставьте окно открытым и повторите действие.'}));};
@@ -25,7 +26,6 @@ const defaultSection=()=>current?.context?.workspace?.defaultModule||current?.co
 const serverRole=(context=current?.context)=>context?.access_model===2?context.grants?.find((grant:any)=>grant.grant_id===grantId(context)&&String(grant.actor_uid)===String(context.actor_uid))?.role:context?.role;
 const fieldAllowed=()=>['employee','owner'].includes(serverRole())&&hasModule('field')&&(current?.context?.capabilities||[]).includes('visit');
 let connectionHost:HTMLElement|undefined,connectionResponse:Reply|undefined;
-const grantLabel=(grant:any)=>`${({employee:'Сотрудник',manager:'Руководитель',analyst:'Аналитик',courier:'Курьер',observer:'Наблюдатель',owner:'Владелец'} as any)[grant.role]||grant.role} · ${({self:'Личная область',employees:'Назначенные сотрудники',team:'Команда',all:'Вся область'} as any)[grant.territory]||grant.territory}`;
 function renderGrantPicker(){
   const host=connectionHost;host?.querySelector('[data-grant-picker]')?.remove();if(!host)return;
   const connected=!!current?.owner;
@@ -33,8 +33,8 @@ function renderGrantPicker(){
   const allowedRoles=!entryRole?['employee','courier','manager','analyst','observer','owner','logistic']:
     entryRole==='analyst'?['analyst']:['employee','agent'].includes(entryRole)?['employee','courier']:
     ['observer','security'].includes(entryRole)?['observer']:['manager','owner'];
-  const grants=connected?(current.context?.grants||[]).filter((grant:any)=>allowedRoles.includes(grant.role)):connectionResponse?.data?.details?.grants;
-  if(!Array.isArray(grants)||grants.length<2||!connected&&connectionResponse?.data?.error!=='grant_required')return;
+  const grants=connected?(current.context?.grants||[]).filter((grant:any)=>current.context?.account_bound||allowedRoles.includes(grant.role)):connectionResponse?.data?.details?.grants;
+  if(!Array.isArray(grants)||grants.length<(connected?2:1)||!connected&&connectionResponse?.data?.error!=='grant_required')return;
   const form=document.createElement('form');form.dataset.grantPicker='';form.className='mobile-login';
   const title=document.createElement('h2');title.textContent='Полномочие';const label=document.createElement('label');label.textContent='Рабочая область';
   const select=document.createElement('select');select.name='grant_id';select.required=true;
@@ -90,6 +90,34 @@ async function initialize(){
   initializing ??= loadSession().finally(()=>{initializing=null;});
   return initializing;
 }
+async function carryLegacyWork(previous:any,next:any){
+  if(!previous?.owner||!next?.owner||previous.owner===next.owner||previous.context?.access_model===2)return;
+  const prior=previous.context,context=next.context;
+  if(prior?.actor_uid===undefined||String(prior.actor_uid)!==String(context.actor_uid)||prior.employee_uuid!==context.employee_uuid)return;
+  if(context.access_model===2){
+    const sameRole=context.grants?.filter((grant:any)=>grant.role===prior.role)||[];
+    if(!sameRole.some((grant:any)=>grant.grant_id===context.grant_id&&(grant.is_default||sameRole.length===1)))return;
+  }
+  if(await vault.get(next.owner,'work-transfer'))return;
+  const old:Entry[]=await vault.get(previous.owner,'queue')||[];
+  if(old.some(entry=>entry.actor_uid!==undefined&&String(entry.actor_uid)!==String(context.actor_uid)))return;
+  await vault.update(next.owner,'queue',(entries:Entry[]|null)=>{
+    const result=new Map((entries||[]).map(entry=>[entry.body.operation_id,entry]));
+    for(const entry of old){
+      const current=result.get(entry.body.operation_id);
+      if(current){
+        if(current.action!==entry.action||canonical(current.body)!==canonical(entry.body))
+          throw Error('Записи с одним номером содержат разные данные. Исходные записи сохранены.');
+        continue;
+      }
+      result.set(entry.body.operation_id,{...entry,actor_uid:context.actor_uid,access_model:context.access_model||1,
+        grant_id:context.grant_id||null,recover_legacy_receipt:context.access_model===2&&entry.action==='command'});
+    }
+    return [...result.values()];
+  });
+  await vault.put(next.owner,'work-transfer',{source:previous.owner});
+}
+
 async function loadSession():Promise<Reply>{
   const previousOwner=current?.owner,previousScope=grantScope();
   if(!await vault.get(deviceScope,'installation')){
@@ -109,7 +137,13 @@ async function loadSession():Promise<Reply>{
       }catch{/* Session access stays available when local storage is restricted. */}
     }
   }
-  if(response.ok){csrf=response.data.csrf;current=response.data.session||null;await vault.put(deviceScope,'last-state',current);}
+  if(response.ok){
+    csrf=response.data.csrf;
+    const next=response.data.session||null;
+    await carryLegacyWork(current||await vault.get(deviceScope,'last-state'),next);
+    current=next;
+    await vault.put(deviceScope,'last-state',current);
+  }
   else if(response.status===0){
     const saved=await vault.get(deviceScope,'last-state');
     current=saved&&saved.expires_at>Date.now()&&saved.context?.source!=='legacy-analyst-web'?saved:null;
@@ -122,14 +156,15 @@ async function loadSession():Promise<Reply>{
   else if(!current||current.context?.source==='legacy-analyst-web')await activity.stop();
   startPolling();return response;
 }
-async function api(method:string,action:string,body?:any,query?:any):Promise<Reply>{
+async function api(method:string,action:string,body?:any,query?:any,recoverLegacyReceipt=false):Promise<Reply>{
   const owner=authority(),requestedGrant=grantId(),scope=current.context?.access_model===2?grantScope()+':':'',operation=current.context?.access_model===2?operationScope()+':':'',key='read:'+scope+action+':'+JSON.stringify(query||{});
   let exportKey='';
   if(method==='POST'&&action==='export'){
     const {operation_id,...selection}=body;exportKey='export-intent:'+operation+canonical(selection);
     const prior=await vault.get(owner,exportKey);if(prior)body=prior;else await vault.put(owner,exportKey,body);
   }
-  const response=await request('api',{method,action,body:body||{},query:query||{},...(requestedGrant!==null?{grant_id:requestedGrant}:{})});
+  const response=await request('api',{method,action,body:body||{},query:query||{},...(requestedGrant!==null?{grant_id:requestedGrant}:{}),
+    ...(recoverLegacyReceipt?{recover_legacy_receipt:true}:{})});
   if(exportKey){if(response.ok)await vault.put(owner,'export-key:'+operation+response.data.manifest.export_id,exportKey);else if([400,409,422].includes(response.status))await vault.put(owner,exportKey,null);}
   if(current?.owner!==owner)return {ok:false,status:401,text:'Вход изменился.'};
   if(method==='GET'&&response.ok&&action!=='operator-status')await vault.put(owner,key,{at:new Date().toISOString(),data:response.data});
@@ -181,8 +216,8 @@ async function flush(){
         if(latest.some(e=>e.action==='document'&&e.body.document_id===entry.body.payload.document_id&&e.state!=='accepted'))continue;
       }
       if(!entryMatchesGrant(entry))continue;
-      const response=await api('POST',entry.action,entry.body);
-      if(!response.status||response.status>=500||[401,408,425,429].includes(response.status)){
+      const response=await api('POST',entry.action,entry.body,undefined,entry.recover_legacy_receipt===true);
+      if(!response.status||response.status>=500||response.data?.error==='grant_changed'||[401,408,425,429].includes(response.status)){
         if([408,425,429,503].includes(response.status))queueRetryAt=Math.max(Date.now()+5000,response.retryAt||0);
         break;
       }
@@ -223,7 +258,17 @@ function startPolling(){clearTimeout(liveTimer);liveTimer=setTimeout(async()=>{
       // Facts refresh in place. Evicting all reads here left a cold offline start empty.
       // Assignment/scope changes can remove authority, so those do invalidate reads.
       if(response.data.resync||response.data.cursor.assignments!==cursor.assignments||cursor.scope&&response.data.cursor.scope!==cursor.scope){await vault.clearReads(owner);await api('GET','work-portfolio');}
-      const context=await request('api',{method:'GET',action:'context'});if(context.ok&&current?.owner===owner){const before=grantScope();current.context=context.data;if(grantScope()!==before)await vault.clearReads(owner);await vault.put(deviceScope,'last-state',current);}
+      const context=await request('api',{method:'GET',action:'context'});
+      if(context.ok&&current?.owner===owner){
+        if((context.data.access_model||1)!==(current.context?.access_model||1)||grantId(context.data)!==grantId()){
+          await initialize();
+          emit({type:'identity',owner:current?.owner},true);
+          return;
+        }
+        const before=grantScope();current.context=context.data;
+        if(grantScope()!==before)await vault.clearReads(owner);
+        await vault.put(deviceScope,'last-state',current);
+      }
     }}
     emit({type:'live',connected:response.ok,dirty:!!response.data?.dirty,resync:!!response.data?.resync,as_of:response.data?.as_of||new Date().toISOString(),reason:response.ok?'':response.status===0?'offline':response.data?.error||'server'});
   }catch{emit({type:'live',connected:false,dirty:false,reason:'offline'});}finally{polling=false;}}
@@ -397,14 +442,28 @@ export const bridge:any={
   state:async()=>{expireSession();return {owner:current?.owner||'',context:current?.context||null,version:'3.3.0-mobile.1',product:'Взыскание',offline:offline||!navigator.onLine,
     connection:{mode:current?.synthetic?'synthetic':current?'mobile':'unconfigured',role:current?.context?.role||'employee',server:location.origin,shared:!current?.synthetic},existingLogins:[],activity:activity.state()};},
   api,command,registryEdit:(body:any,owner?:string)=>enqueue('registry-edit',body,owner),queue,
-  draft:async(name:string,value?:any,expected?:string)=>{if(!current?.owner&&value===undefined)return {ok:true,data:null};const owner=authority(expected);return {ok:true,data:value===undefined?await vault.get(owner,'draft:'+name):await vault.put(owner,'draft:'+name,value)};},
+  draft:async(name:string,value?:any,expected?:string)=>{
+    if(!current?.owner&&value===undefined)return {ok:true,data:null};
+    const owner=authority(expected),key='draft:'+name;
+    if(value!==undefined){
+      await vault.put(owner,key,{draft_version:2,value});
+      return {ok:true,data:value};
+    }
+    const saved=await vault.get(owner,key);
+    if(saved?.draft_version===2)return {ok:true,data:saved.value};
+    if(saved!==null)return {ok:true,data:saved};
+    const moved=await vault.get(owner,'work-transfer');
+    return {ok:true,data:moved?.source?await vault.get(moved.source,key):null};
+  },
   onChange:(fn:(event:any)=>void)=>{listeners.add(fn);return()=>listeners.delete(fn);},
   telemetry:async(event:any)=>current?api('POST','telemetry',event):{ok:true},
   connect:async(input:any)=>{
+    if(input.action==='account-registration-options')return request('registration');
     if(input.action==='refresh'){const before=current?.owner,scope=grantScope();await initialize();if(current?.owner&&(before!==current.owner||scope!==grantScope())){navigationTarget=defaultSection();emit({type:'identity',owner:current.owner},true);}return {ok:true};}
     if(input.action==='offline'){offline=!!input.value;if(!offline)background(flush());return {ok:true};}
     const installation=await vault.get(deviceScope,'installation');
     const device_id=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(installation)))).map(v=>v.toString(16).padStart(2,'0')).join('');
+    if(input.action==='account-register')return request('registration',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
     if(input.action==='login'||input.action==='logout')legacyTried=true;
     const response=input.action==='grant'?await api('POST','grant',{grant_id:input.grant_id}):await request(input.action==='logout'?'logout':input.action==='password'?'password':'login',{...input,device_id,device_label:navigator.userAgent.slice(0,120)});
     connectionResponse=response;

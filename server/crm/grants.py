@@ -6,7 +6,7 @@ import uuid
 
 from .contract import CRMError, canonical, identifier, now
 from .roles import GRANT_ROLE_CAPABILITIES
-from . import storage
+from . import access, storage
 
 LEGACY_MODEL = 1
 GRANTS_MODEL = 2
@@ -152,14 +152,19 @@ def _scope(conn, principal, grant):
 def _project(conn, legacy, grant, access_model, policy_revision, available):
     if grant.role == "owner" and grant.territory != "all":
         raise _error("Глобальное полномочие владельца имеет некорректную область.", "grant_invalid", 403)
-    all_contracts = grant.all_contracts or grant.territory == "all" or grant.role == "owner"
+    limited_manager = legacy.registered_manager and grant.role == 'manager'
+    scope = _scope(conn, legacy, grant)
+    if limited_manager:
+        scope &= access.registered_manager_staff(conn, legacy)
+    all_contracts = not limited_manager and (grant.all_contracts or grant.territory == "all" or grant.role == "owner")
     return replace(
         legacy,
         role=grant.role,
         capabilities=grant.capabilities | ({'access_manage'} & legacy.capabilities if grant.role == 'analyst' else set()),
-        employee_scope=_scope(conn, legacy, grant),
+        employee_scope=scope,
         all_contracts=all_contracts,
-        read_all_contracts=grant.read_all_contracts or all_contracts,
+        read_all_contracts=not limited_manager and (grant.read_all_contracts or all_contracts),
+        server_operator=legacy.server_operator and legacy.role == grant.role == 'manager',
         grants=available,
         access_model=access_model,
         policy_revision=policy_revision,
@@ -167,7 +172,8 @@ def _project(conn, legacy, grant, access_model, policy_revision, available):
     )
 
 
-def resolve(conn, legacy, *, role=None, grant_id=None, allow_owner=False, force_model=None):
+def resolve(conn, legacy, *, role=None, grant_id=None, allow_owner=False, force_model=None,
+            account_bound=False):
     row = _access(conn, legacy.actor_uid)
     access_model = int(row["access_model"]) if row else LEGACY_MODEL
     revision = int(row["policy_revision"]) if row else 0
@@ -181,7 +187,18 @@ def resolve(conn, legacy, *, role=None, grant_id=None, allow_owner=False, force_
             policy_revision=revision,
             grant_id=None,
         )
-    selected = choose(available, role=role, grant_id=grant_id, allow_owner=allow_owner)
+    if account_bound:
+        available = tuple(grant for grant in available if grant.role != 'owner' or allow_owner)
+    try:
+        selected = choose(available, role=None if account_bound and grant_id else role,
+                          grant_id=grant_id, allow_owner=allow_owner)
+    except CRMError as exc:
+        if account_bound and exc.code == 'grant_required':
+            raise _error(str(exc), exc.code, exc.status, {
+                'grant_ids': [grant.grant_id for grant in available],
+                'grants': [grant.to_dict() for grant in available],
+            }) from None
+        raise
     return _project(conn, legacy, selected, GRANTS_MODEL, revision, available)
 
 

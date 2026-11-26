@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crm import access, grants, schema, shared_auth, shared_server, storage
+from crm import access, grants, schema, shared_auth, shared_server, storage, store
 from crm.contract import CRMError, canonical
 from crm.roles import GRANT_ROLE_CAPABILITIES, ROLE_CAPABILITIES
 from test_crm_core import call_body, crm_world
@@ -69,7 +69,7 @@ def test_explicit_opt_in_preserves_legacy_authority_and_returns_grants(crm_world
     exchange = asyncio.run(sessions.exchange(credential, kind='employee'))
     assert exchange['access_model'] == 2 and exchange['grant_id'] == after.grant_id
     assert exchange['grants'][0]['territory'] == 'self'
-    request = SimpleNamespace(headers={'Authorization': 'Bearer ' + exchange['token']})
+    request = SimpleNamespace(method='GET', path='/api/crm/context', headers={'Authorization': 'Bearer ' + exchange['token']})
     assert asyncio.run(sessions.authenticate(request)).grant_id == after.grant_id
 
 
@@ -81,10 +81,6 @@ def test_legacy_and_grant_clients_share_http_service(crm_world):
     grant_token = 'synthetic-grant-client-credential'
     legacy_actor = identity(crm_world)
     grant_actor = identity(crm_world, uid=crm_world['stranger'].actor_uid)
-    with storage.connect() as conn:
-        first = grants.upsert(conn, grant_actor['uid'], role='employee', territory='self', capabilities={'call'})
-        grants.upsert(conn, grant_actor['uid'], role='employee', territory='team', capabilities={'visit'})
-        grants.set_model(conn, grant_actor['uid'], 2)
 
     async def verify(token, *, kind, device_fingerprint):
         assert kind == 'employee' and device_fingerprint == ''
@@ -104,14 +100,33 @@ def test_legacy_and_grant_clients_share_http_service(crm_world):
             assert response.status == 200, await response.text()
             accepted = await response.json()
 
+            grant_entry = {'X-App-Token': grant_token}
+            response = await client.post('/auth/exchange', headers=grant_entry)
+            assert response.status == 200
+            pre_activation = {'Authorization': 'Bearer ' + (await response.json())['token']}
+            with storage.connect() as conn:
+                first = grants.upsert(conn, grant_actor['uid'], role='employee', territory='self', capabilities={'call'})
+                second = grants.upsert(conn, grant_actor['uid'], role='employee', territory='team', capabilities={'visit'})
+                grants.set_model(conn, grant_actor['uid'], 2)
             response = await client.post('/auth/exchange', headers={'X-App-Token': grant_token})
             assert response.status == 409 and (await response.json())['error'] == 'grant_required'
-            response = await client.post('/auth/exchange', headers={'X-App-Token': grant_token, 'X-CRM-Grant': first.grant_id})
+
+            with storage.connect() as conn:
+                grants.upsert(conn, grant_actor['uid'], grant_id=first.grant_id, role='employee', territory='self',
+                              capabilities={'call'}, is_default=True)
+            response = await client.get('/api/crm/context', headers=pre_activation)
+            assert response.status == 200
+            old_context = await response.json()
+            assert old_context['grant_id'] == first.grant_id and old_context['capabilities'] == ['call']
+            response = await client.post('/auth/exchange', headers=grant_entry)
+            assert response.status == 200 and (await response.json())['grant_id'] == first.grant_id
+
+            response = await client.post('/auth/exchange', headers={**grant_entry, 'X-CRM-Grant': second.grant_id})
             assert response.status == 200
             chosen = await response.json()
             new_headers = {'Authorization': 'Bearer ' + chosen['token']}
             context = await (await client.get('/api/crm/context', headers=new_headers)).json()
-            assert context['access_model'] == 2 and context['grant_id'] == first.grant_id
+            assert context['access_model'] == 2 and context['grant_id'] == second.grant_id and context['capabilities'] == ['visit']
             response = await client.get('/api/crm/card', headers=new_headers, params={'person_uuid': crm_world['person']})
             assert response.status in (403, 404)
             response = await client.post('/api/crm/command', headers=old_headers, json=command)
@@ -156,6 +171,56 @@ def test_choose_requires_default_unique_or_explicit_grant():
     assert grants.choose([defaulted, second], role='manager') is defaulted
     unique = grants.Grant('grant-c', 1, 'observer', 'all', frozenset({'analytics'}), 1)
     assert grants.choose([first, unique], role='observer') is unique
+
+
+def test_one_account_switches_between_separately_scoped_roles(crm_world):
+    namespace()
+    actor = identity(crm_world, 'manager')
+    with storage.connect() as conn:
+        manager = grants.upsert(conn, actor['uid'], role='manager', territory='self',
+                                capabilities={'assign'}, is_default=True)
+        logistic = grants.upsert(conn, actor['uid'], role='logistic', territory='employees',
+                                 employees=[crm_world['stranger'].employee_uuid], capabilities={'logistics'})
+        grants.set_model(conn, actor['uid'], 2)
+    assert shared_auth.principal(actor).grant_id == manager.grant_id
+    with pytest.raises(CRMError, match='полномочие'):
+        shared_auth.principal(actor, grant_id=logistic.grant_id)
+    verified_account = {**actor, 'account_bound':True, 'server_operator':True}
+    assert shared_auth.principal(verified_account).grant_id == manager.grant_id
+    active = shared_auth.principal(verified_account, grant_id=logistic.grant_id)
+    assert active.role == 'logistic' and active.capabilities == {'logistics'}
+    assert active.employee_scope == {crm_world['stranger'].employee_uuid}
+    assert not active.server_operator and not active.read_all_contracts
+
+
+def test_queue_rechecks_binding_and_recovers_exact_previous_receipt(crm_world):
+    namespace()
+    actor = identity(crm_world)
+    async def verify(_token):
+        return actor
+    sessions = shared_auth.Sessions(b'q'*32,verify,audit=lambda *_:None)
+    credential='confirmed-fixture-account-credential'
+    first=asyncio.run(sessions.exchange(credential))
+    body=call_body(crm_world)
+    accepted=store.command(shared_auth.principal(actor),body)
+    with storage.connect() as conn:
+        grant=grants.upsert(conn,actor['uid'],role='employee',territory='self',capabilities={'call'},is_default=True)
+        grants.set_model(conn,actor['uid'],2)
+    def request(session,binding,*,recover=False):
+        headers={'Authorization':'Bearer '+session['token'],'X-CRM-Work-Authority':binding}
+        if recover:
+            headers['X-CRM-Recover-Legacy']='1'
+        return SimpleNamespace(method='POST',path='/api/crm/command',headers=headers)
+    with pytest.raises(CRMError) as stale:
+        asyncio.run(sessions.authenticate(request(first,f"{actor['uid']}/1/")))
+    assert stale.value.code=='grant_changed'
+    second=asyncio.run(sessions.exchange(credential,grant_id=grant.grant_id))
+    binding=f"{actor['uid']}/2/{grant.grant_id}"
+    principal=asyncio.run(sessions.authenticate(request(second,binding,recover=True)))
+    recovered=store.command(principal,body)
+    assert recovered==dict(ok=True,status='accepted',operation_id=body['operation_id'],event_id=accepted['event_id'])
+    with storage.connect(readonly=True) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM crm_commands WHERE operation_id=?',(body['operation_id'],)).fetchone()[0]==1
 
 
 def test_no_cross_product_between_grants_with_the_same_role(crm_world):
@@ -283,7 +348,7 @@ def test_current_session_and_authority_grace_do_not_preserve_revoked_grant(crm_w
 
     sessions = shared_auth.Sessions(b's' * 32, verify, clock=lambda: clock[0], audit=lambda *_: None)
     token = asyncio.run(sessions.exchange(credential, kind='employee'))['token']
-    request = SimpleNamespace(headers={'Authorization': 'Bearer ' + token})
+    request = SimpleNamespace(method='GET', path='/api/crm/card', headers={'Authorization': 'Bearer ' + token})
     assert asyncio.run(sessions.authenticate(request)).access_model == 2
     with storage.connect() as conn:
         grants.revoke(conn, actor['uid'], grant_id, role='employee')

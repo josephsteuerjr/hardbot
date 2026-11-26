@@ -3,9 +3,9 @@
 The working credential is accepted only at exchange on the pinned first-party
 origin. It is sealed inside an audience-bound pilot session. Background work
 stores a separately sealed credential; plaintext never enters DB/logs/renderer.
-A fresh exchange always checks the live authority. API calls reuse a successful
-confirmation for 15 seconds; an unavailable authority allows at most 30 further
-seconds of that confirmation, while explicit denial clears it immediately.
+A fresh exchange, a context check or a sensitive action checks the live
+authority. Ordinary reads can reuse a successful confirmation for 15 seconds
+and for at most 30 further seconds while the authority is unavailable.
 """
 import asyncio
 import base64
@@ -30,6 +30,7 @@ AUTHORITY_GRACE_SECONDS = 30
 AUTHORITY_CACHE_LIMIT = 2048
 NAMESPACE = 'crm-shared-pilot-v1'
 ENTRY_KINDS = {'manager', 'employee', 'analyst', 'analyst-device'}
+BOUND_ACTIONS = frozenset({'command', 'receipt', 'registry-edit', 'active-time'})
 
 
 def fault(code='pilot_session_invalid', status=401):
@@ -61,7 +62,8 @@ def validate_identity(value):
         raise fault('manager_required', 403)
     return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''),
                 role='observer' if me['role']=='security' else me['role'],
-                server_operator=me['role'] != 'security' and value.get('server_operator') is True)
+                server_operator=me['role'] != 'security' and value.get('server_operator') is True,
+                account_bound=device.get('account_bound') is True)
 
 
 def validate_entry_identity(value, kind):
@@ -78,7 +80,8 @@ def validate_entry_identity(value, kind):
             or (uid < 0 and kind != 'analyst-device') or role not in allowed
             or me.get('role') != role or type(device.get('id')) is not int or device['id'] < 1):
         raise fault('identity_protocol', 503)
-    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''), role=role)
+    return dict(uid=uid, device_id=device['id'], name=str(me.get('name') or ''), role=role,
+                account_bound=device.get('account_bound') is True)
 
 
 class Authority:
@@ -162,10 +165,17 @@ def _legacy_principal(conn, identity):
         all_contracts=bool(policy['all_contracts']) and role in {'manager','analyst'}
     logistics_caps = set(json.loads(membership['capabilities_json'])) & {'logistics'} if membership and membership['role'] in {'manager', 'owner'} else set()
     access_caps = {'access_manage'} if membership and membership['role'] == 'analyst' and 'access_manage' in json.loads(membership['capabilities_json']) else set()
+    registered_manager = role == 'manager' and conn.execute(
+        "SELECT 1 FROM crm_employees WHERE employee_uuid=? AND source='crm-registration'",(result.employee_uuid,)).fetchone()
+    if registered_manager:
+        employees = access.registered_manager_staff(conn, result)
+        all_contracts = False
     legacy = replace(result, role=role, capabilities=(result.capabilities & ROLE_CAPABILITIES[role]) | logistics_caps | access_caps,
                      employee_scope=employees, all_contracts=all_contracts,
-                     read_all_contracts=role != 'logistic',
-                     server_operator=role == 'manager' and identity.get('server_operator') is True)
+                     read_all_contracts=role != 'logistic' and not registered_manager,
+                     server_operator=role == 'manager' and identity.get('server_operator') is True,
+                     account_bound=identity.get('account_bound') is True,
+                     registered_manager=bool(registered_manager))
     return legacy, role, authority_role in {'manager', 'full'}
 
 
@@ -173,7 +183,8 @@ def principal(identity, *, grant_id=None):
     from . import grants
     with storage.connect(readonly=True) as conn:
         legacy, role, allow_owner = _legacy_principal(conn, identity)
-        return grants.resolve(conn, legacy, role=role, grant_id=grant_id, allow_owner=allow_owner)
+        return grants.resolve(conn, legacy, role=role, grant_id=grant_id, allow_owner=allow_owner,
+                              account_bound=identity.get('account_bound') is True)
 
 
 def backfill(identity, *, activate=False, expected_revision=None):
@@ -219,7 +230,7 @@ class Sessions:
             raw=base64.urlsafe_b64decode(sealed)
             payload=json.loads(self.cipher.decrypt(raw[:12],raw[12:],AUDIENCE+b':background'))
         except Exception:raise fault() from None
-        identity=await self._verify(payload['credential'],**payload.get('entry',{}))
+        identity=await self._verify(payload['credential'],allow_cache=False,**payload.get('entry',{}))
         if identity['uid']!=payload['uid'] or identity['device_id']!=payload['device_id']:raise fault()
         return await self._resolve(identity, payload.get('grant_id'))
 
@@ -321,10 +332,24 @@ class Sessions:
         if not header.startswith('Bearer '):
             raise fault()
         payload = self.open(header[7:])
-        identity = await self._verify(payload['credential'], **payload.get('entry', {}))
+        action = request.path.rsplit('/', 1)[-1]
+        cached_read = request.method == 'GET' and action not in {
+            'context', 'operator-status', 'grant-admin', 'grant-catalog',
+        }
+        identity = await self._verify(payload['credential'], allow_cache=cached_read, **payload.get('entry', {}))
         if identity['uid'] != payload['uid'] or identity['device_id'] != payload['device_id']:
             raise fault()
-        return await self._resolve(identity, payload.get('grant_id'))
+        principal = await self._resolve(identity, payload.get('grant_id'))
+        binding = request.headers.get('X-CRM-Work-Authority')
+        if binding is not None:
+            expected = f"{principal.actor_uid}/{principal.access_model}/{principal.grant_id or ''}"
+            if request.method != 'POST' or action not in BOUND_ACTIONS or binding != expected:
+                raise CRMError('Изменились полномочия. Исходная операция сохранена.', 'grant_changed', 409)
+        if binding and action == 'command' and principal.access_model == 2 and request.headers.get('X-CRM-Recover-Legacy') == '1':
+            # A migration can check an exact earlier acknowledgement. This does
+            # not authorize a new command or expose the old result payload.
+            principal = replace(principal, recover_legacy_receipt=True)
+        return principal
 
 
 def audit_exchange(employee, identity):

@@ -1,0 +1,6 @@
+services:
+  api:
+    environment:
+      HARD_CRM_GRANT_ADMIN_DSN_FILE: /run/secrets/grant-admin-dsn
+    volumes:
+      - ${CRM_GRANT_ADMIN_DSN_FILE:?dedicated grant editor DSN required}:/run/secrets/grant-admin-dsn:ro

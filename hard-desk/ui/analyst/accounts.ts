@@ -63,6 +63,7 @@ function details(root: HTMLElement, a: any) {
     <dl class="kv" style="grid-template-columns:200px 1fr;max-width:760px;font-size:15px">
       <dt>Логин</dt><dd class="mono">${esc(a.username || "—")}</dd>
       <dt>Офис</dt><dd>${esc(a.office || "—")}</dd>
+      ${a.registration_scope?`<dt>Республика</dt><dd>${esc(({tj:'Таджикистан',uz:'Узбекистан'} as Record<string,string>)[a.registration_scope.country]||'')}</dd><dt>Город</dt><dd>${esc(a.registration_scope.city||'Вся республика')}</dd>`:''}
       <dt>Роль</dt><dd>${esc(roleTitle(a) || "—")}</dd>
       <dt>Статус</dt><dd><span class="tag ${a.status === "active" ? "ok" : "warn"}">${esc(statusTitle(a))}</span>${a.must_change_password ? ' <span class="sub">сменит пароль при входе</span>' : ""}</dd>
       <dt>Создан</dt><dd>${esc(fmt(a.created_at) || "—")}</dd>

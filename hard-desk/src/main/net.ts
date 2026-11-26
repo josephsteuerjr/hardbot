@@ -373,13 +373,13 @@ export function desktopFingerprint(): string {
   return pcIdentity().fingerprint;
 }
 
-export async function pcLoginProof(base: string, username: string, password: string): Promise<any> {
+export async function pcLoginProof(base: string, username: string, password: string, employee = ''): Promise<any> {
   const identity = pcIdentity();
   const response = await request(base + "/api/account/pc_challenge", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ public_key: identity.publicKey, fingerprint: identity.fingerprint, label: deviceName() }) });
   const c = await response.json() as any;
   if (!response.ok || !c.ok) throw new Error(c.error || "Проверка компьютера недоступна. Обновите программу и сервер.");
-  const message = [c.challenge_id, c.nonce, "", username.trim().toLowerCase(), createHash("sha256").update(password).digest("hex")].join("\n");
+  const message = [c.challenge_id, c.nonce, employee, username.trim().toLowerCase(), createHash("sha256").update(password).digest("hex")].join("\n");
   return { challenge_id: c.challenge_id, signature: sign(null, Buffer.from(message), identity.privateKey).toString("base64") };
 }
 

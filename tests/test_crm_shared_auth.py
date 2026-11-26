@@ -30,7 +30,7 @@ def session(verifier=None, **kwargs):
 
 
 def request(token):
-    return SimpleNamespace(headers={'Authorization': 'Bearer ' + token})
+    return SimpleNamespace(method='GET', path='/api/crm/card', headers={'Authorization': 'Bearer ' + token})
 
 
 def test_session_is_separate_sealed_and_reuses_short_authority_confirmation():
@@ -169,7 +169,7 @@ def test_original_credential_and_local_claims_are_not_api_authority():
     for headers in [{'X-Pult-Token': TOKEN}, {'X-Device-Token': TOKEN},
                     {'Authorization': 'Bearer ' + TOKEN}, {'X-Dev-Uid': str(IDENTITY['uid'])}]:
         with pytest.raises(CRMError):
-            asyncio.run(sessions.authenticate(SimpleNamespace(headers=headers)))
+            asyncio.run(sessions.authenticate(SimpleNamespace(method='GET',path='/api/crm/card',headers=headers)))
 
 
 def test_authority_origin_cannot_be_set_by_an_external_address():

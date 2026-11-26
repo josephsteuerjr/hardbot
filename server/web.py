@@ -5077,7 +5077,7 @@ async def _manager_device_me(request: web.Request) -> web.Response:
         _, dev = db.manager_device_check(ptok)
         if dev:
             device = {"id": dev["id"], "name": dev["device"] or "",
-                      "created_at": dev["created_at"]}
+                      "created_at": dev["created_at"], "account_bound": bool(dev["account_id"])}
             if dev["account_id"]:
                 server_operator = await asyncio.to_thread(accounts.is_server_operator, dev["account_id"], uid)
     return _manager_json({"ok": True, "device": device, "team": len(team), "server_operator": server_operator,
@@ -5582,6 +5582,27 @@ async def _account_capabilities(request):
                               'mobile_registration':True,'root_bootstrap':True})
 
 
+async def _crm_account_registration(request):
+    import crm_registration
+    _admin_too_many_fails(request)
+    if request.method=='GET':
+        if os.getenv('HARD_CRM_DESKTOP')!='1' and os.getenv('HARD_CRM_MOBILE')!='1':
+            raise _json_error(web.HTTPForbidden,'crm_registration_disabled')
+        result=await asyncio.to_thread(crm_registration.options)
+        return web.json_response(result,headers={'Cache-Control':'no-store'})
+    body=await _json_object(request)
+    audience=(body or {}).get('audience')
+    option={'crm-mobile':'HARD_CRM_MOBILE','crm-desktop':'HARD_CRM_DESKTOP'}.get(audience) if isinstance(audience,str) else None
+    if not option or os.getenv(option)!='1':
+        raise _json_error(web.HTTPForbidden,'crm_registration_disabled')
+    try:
+        result=await asyncio.to_thread(crm_registration.submit,body,_admin_peer(request))
+    except ValueError as exc:
+        _admin_auth_failed(request,scope='account')
+        return web.json_response({'ok':False,'text':str(exc)},status=400,headers={'Cache-Control':'no-store'})
+    return web.json_response(result,status=201,headers={'Cache-Control':'no-store'})
+
+
 async def _account_root_challenge(request):
     _admin_too_many_fails(request)
     body=await _json_object(request)
@@ -5637,6 +5658,9 @@ async def _account_login(request: web.Request) -> web.Response:
     else:
         _admin_auth_ok(request, scope="account")
     if result.get("action") in ("ok", "ok_pending"):
+        if result['action']=='ok' and not result.get('must_change_password') and body.get('audience') in ('crm-desktop','crm-mobile'):
+            import crm_registration
+            await asyncio.to_thread(crm_registration.project_verified_account,result['uid'])
         await _observe_client_version(request, token=result['token'], login=True)
         return web.json_response(result)
     status = 429 if result.get("action") == "locked" else 409 if result.get("action") == "conflict" else 403
@@ -5911,8 +5935,14 @@ async def _admin_account_approve(request: web.Request) -> web.Response:
         if _target and _target["created_by"] == "self-registration" and not password_review:
             raise _json_error(web.HTTPForbidden, "registration_requires_attested_request")
     if body.get("username"):
-        result = await asyncio.to_thread(accounts.approve_account,
-                                         str(body.get("username")), by, ip=_admin_peer(request))
+        import crm_registration
+        try:
+            result = await asyncio.to_thread(crm_registration.approve,str(body['username']),by,_admin_peer(request))
+        except ValueError as exc:
+            return web.json_response({'ok':False,'error':str(exc)},status=409)
+        if result is None:
+            result = await asyncio.to_thread(accounts.approve_account,
+                                             str(body.get("username")), by, ip=_admin_peer(request))
     elif body.get("device_id") is not None:
         try:
             device_id = int(body.get("device_id"))
@@ -6109,7 +6139,8 @@ def _admin(request: web.Request) -> None:
                     'JOIN accounts a ON a.id=g.account_id WHERE g.account_id=?',(linked['account_id'],)).fetchone()
             root_manager=bool(grant and grant['granted_by']=='ssh-root' and grant['role'] in {'manager','full'})
             if gate=='ok' and grant and (root_manager or grant['role']=='analyst' or (grant['role']=='full' and grant['telegram_id']==ADMIN_ID)):
-                request['admin_device']={**dict(linked),'role':'operator','account_approver':grant['principal'],'account_session':True}
+                approver='' if grant['granted_by']=='crm-registration' else grant['principal']
+                request['admin_device']={**dict(linked),'role':'operator','account_approver':approver,'account_session':True}
                 _admin_auth_ok(request)
                 return
         raise _json_error(web.HTTPForbidden,'account_admin_access_denied')
@@ -8070,6 +8101,8 @@ def build_app(bot=None) -> web.Application:
     app.router.add_post("/api/agent/device/logout", _agent_device_logout)
     # Аккаунты «логин-пароль»
     app.router.add_post("/api/account/register", _account_register)
+    app.router.add_get('/api/account/crm-registration',_crm_account_registration)
+    app.router.add_post('/api/account/crm-registration',_crm_account_registration)
     app.router.add_post('/api/account/gps_request',_account_gps_request)
     app.router.add_post('/api/account/pc_challenge',_account_pc_challenge)
     app.router.add_get('/api/account/staff',_account_staff)

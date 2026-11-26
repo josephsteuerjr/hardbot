@@ -1,6 +1,8 @@
 """Isolated actor-grant administration with optimistic, idempotent apply."""
 
 import json
+import os
+from pathlib import Path
 import re
 
 from . import access, grants, storage, store
@@ -46,12 +48,30 @@ def _environment(conn):
         "SELECT key,value FROM crm_meta WHERE key IN "
         "('synthetic_candidate','distribution_mode')"
     )}
-    if "synthetic_candidate" not in rows and rows.get("distribution_mode") != "isolated":
-        raise _error(
-            "Управление grants доступно только в изолированном проверочном контуре.",
-            "grant_admin_unavailable",
-            403,
-        )
+    if "synthetic_candidate" in rows or rows.get("distribution_mode") == "isolated":
+        return True
+    if storage.is_postgres(conn) and os.environ.get('HARD_CRM_GRANT_ADMIN_DSN_FILE'):
+        return False
+    raise _error("Управление полномочиями не подключено.", "grant_admin_unavailable", 403)
+
+
+def _writer():
+    filename = os.environ.get('HARD_CRM_GRANT_ADMIN_DSN_FILE')
+    if not storage.postgres_enabled() or not filename:
+        return storage.connect()
+    with storage.connect(readonly=True) as reader:
+        instance = reader.execute("SELECT value FROM crm_meta WHERE key='instance_id'").fetchone()
+    writer = storage.Postgres(Path(filename).read_text(encoding='utf-8').strip())
+    try:
+        target = writer.execute("SELECT value FROM crm_meta WHERE key='instance_id'").fetchone()
+        if not instance or not target or instance[0] != target[0] or writer.execute(
+                'SELECT current_user').fetchone()[0] != 'crm_access_admin':
+            raise _error('Не подтверждено подключение редактора к базе CRM.', 'grant_admin_unavailable', 503)
+        writer.commit()
+    except BaseException:
+        writer.close()
+        raise
+    return writer
 
 
 def _require_admin(principal):
@@ -447,7 +467,7 @@ def _common(body, operation):
 
 def catalog(principal):
     with storage.connect(readonly=True) as conn:
-        _environment(conn)
+        isolated = _environment(conn)
         _require_admin(principal)
         roles = []
         for role in sorted(GRANT_ROLE_CAPABILITIES):
@@ -472,13 +492,13 @@ def catalog(principal):
             ],
             admin_capability="access_manage",
             global_owner_only=True,
-            isolated=True,
+            isolated=isolated,
         )
 
 
 def list_state(principal):
     with storage.connect(readonly=True) as conn:
-        _environment(conn)
+        isolated = _environment(conn)
         _require_admin(principal)
         rows = list(
             conn.execute(
@@ -524,7 +544,7 @@ def list_state(principal):
                     reason=reason,
                 )
             )
-        return dict(schema_version=SCHEMA_VERSION, actors=actors, isolated=True)
+        return dict(schema_version=SCHEMA_VERSION, actors=actors, isolated=isolated)
 
 
 def preview(principal, body):
@@ -537,9 +557,9 @@ def preview(principal, body):
 
 def apply(principal, body):
     body = _common(body, "apply")
-    with storage.connect() as conn:
+    with _writer() as conn:
         storage.begin(conn)
-        _environment(conn)
+        isolated = _environment(conn)
         principal = _refresh_admin(conn, principal)
         actor = _actor(conn, body["actor_uid"])
         _authorize_target(principal, actor)
@@ -607,7 +627,7 @@ def apply(principal, body):
             policy_revision=policy_revision,
             result_grants=[grant.to_dict() for grant in grants.load(conn, actor["actor_uid"])],
             applied_at=applied_at,
-            production_access_changed=False,
+            production_access_changed=not isolated and bool(payload["diff"]),
         )
         store.acknowledge(
             conn, principal, body["operation_id"], body, result, applied_at

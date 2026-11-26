@@ -358,7 +358,7 @@ const actions = new Set([
   "telemetry",
   "document",
 ]);
-const transport: queue.Transport = async (method, action, body, query) => {
+const transport: queue.Transport = async (method, action, body, query, binding) => {
   if (!actions.has(action) || !["GET", "POST"].includes(method))
     return { ok: false, status: 400, text: "Неизвестный запрос." };
   if (!["synthetic", "remote"].includes(config()?.mode || ""))
@@ -401,6 +401,8 @@ const transport: queue.Transport = async (method, action, body, query) => {
       headers: {
         ...(shared() ? {Authorization: "Bearer " + credential} : {[role() === "employee" ? "X-App-Token" : "X-Pult-Token"]: credential}),
         "Content-Type": "application/json", "X-Client-Version": app.getVersion(), "X-Work-Product": "hard",
+        ...(shared() && binding ? {'X-CRM-Work-Authority':`${binding.actor_uid}/${binding.access_model}/${binding.grant_id||''}`} : {}),
+        ...(shared() && binding?.recover_legacy_receipt ? {'X-CRM-Recover-Legacy':'1'} : {}),
       },
       body: method === "POST" ? JSON.stringify(body || {}) : undefined,
     }, action==='changes'?12000:["export", "import-preview", "import-apply", "manager-report", "manager-statistics", "manager-report-download", "analyst-report", "analyst-statistics", "three-hour"].includes(action) ? 120000 : 30000);
@@ -480,8 +482,8 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
   }catch{return {ok:false,status:0,text:'Не удалось подтвердить результат в службе входа. Не повторяйте изменение с новым ID.'};}
 }
 
-const send:queue.Transport=async(method,action,body,query)=>{
-  const result=await transport(method,action,body,query);
+const send:queue.Transport=async(method,action,body,query,binding)=>{
+  const result=await transport(method,action,body,query,binding);
   if(result.ok)lastConfirmedAt=new Date().toISOString();
   const stage=['registry-edit','command','active-time'].includes(action)?'save':'api';
   diagnostic(stage,result.ok?'confirmed':result.status===401?'login_required':result.status===403?'access_denied':result.status===409?'requires_review':result.status===0?'network_unavailable':'api_error',result.ok,{status:result.status});
@@ -549,12 +551,23 @@ const live=new CrmLive(query=>send('GET','changes',undefined,query),()=>owner,
   event=>notifyChanged('live',event));
 app.once('will-quit',()=>live.stop());
 
-async function identify() {
+async function identify(previous = readSettings().crmLast as any) {
   const result = await send("GET", "context");
   if (result.ok) {
     currentContext = result.data;
     owner = origin() + "\n" + currentContext.employee_uuid +
-      (currentContext.access_model === 2 ? "\n" + currentContext.actor_uid + "\n" + currentContext.grant_id : "");
+      (currentContext.actor_uid !== undefined ? "\n" + currentContext.actor_uid : "") +
+      (currentContext.access_model === 2 ? "\n" + currentContext.grant_id : "");
+    const sameActor = previous?.context?.actor_uid !== undefined &&
+      String(previous.context.actor_uid) === String(currentContext.actor_uid);
+    const selected = currentContext.grants?.find((grant:any) => grant.grant_id === currentContext.grant_id);
+    const legacySeat = currentContext.access_model !== 2 || selected && selected.role === previous?.context?.role &&
+      (selected.is_default || currentContext.grants.filter((grant:any) => grant.role === selected.role).length === 1);
+    if (sameActor && previous.origin === origin() && previous.context.employee_uuid === currentContext.employee_uuid &&
+        previous.context.access_model !== 2 && legacySeat && typeof previous.owner === 'string') {
+      try {queue.carryLegacyWork(previous.owner, owner, currentContext);}
+      catch(error) {connectionNotice=(error as Error).message;}
+    }
     if(STABLE_CRM&&product.id==='hard'&&currentContext.role==='employee'){
       try{queue.importSoftQueue(owner);}
       catch(error){connectionNotice=(error as Error).message;}
@@ -575,10 +588,13 @@ async function identify() {
         context: currentContext,
       },
     });
-    const anchor = await send("POST", "anchor", {
+    const identifiedOwner = owner;
+    clock = null;
+    void send("POST", "anchor", {
       installation_id: queue.installation(),
-    });
-    clock = anchor.ok ? { ...anchor.data, monotonic: performance.now() } : null;
+    }).then(anchor => {
+      if (owner === identifiedOwner && anchor.ok) clock = {...anchor.data, monotonic:performance.now()};
+    }).catch(() => {});
   } else if (result.status === 401 || result.status === 403) {
     if(config())forgetAuthority(result.text || "Сервер не подтвердил доступ.");
   } else {
@@ -966,6 +982,8 @@ app
       return { ok: true };
     });
     safeHandler("crm:connect", async (input: any) => {
+      if(['account-registration-options','account-register'].includes(input?.action))
+        return accountAction(input.action,input);
       if (input?.action !== 'offline' && await analystRuntime.busy())
         throw Error('Дождитесь завершения текущей операции Аналитика перед сменой входа.');
       if (input?.action !== 'offline') analystRuntime.stop();
@@ -979,6 +997,7 @@ app
         });
         if(input.action==='account-password')return result;
         if(input.action==='account-status'&&!accountState().available)return result;
+        const priorWorkspace = readSettings().crmLast as any;
         forgetAuthority('');
         writeSettings({crmConnection:undefined,crmLast:undefined,crmExplicitEntry:true});
         if(input.action==='account-logout'||(result.data as any).pending)return result;
@@ -990,7 +1009,7 @@ app
           throw error;
         }
         writeSettings({crmConnection:{mode:'remote',source:'crm',server:PILOT_BASE,auth:'existing-login'}});
-        offline=false;return identify();
+        offline=false;return identify(priorWorkspace);
       }
       if (input?.action === "offline") {
         offline = !!input.value;
@@ -1000,9 +1019,13 @@ app
         const source: EntrySource = input.action === 'existing-manager' ? 'manager' : input.source;
         if (!ENTRY_SOURCES.includes(source)) throw new Error('Выберите сохранённый вход.');
         await pilotCredential(undefined, true, source, input.grant_id);
+        const priorWorkspace = readSettings().crmLast as any;
+        forgetAuthority('');
         writeSettings({crmConnection: {mode: "remote", role: source === 'manager' || source === 'analyst' ? source : 'employee', source,
           server: PILOT_BASE, auth: "existing-login"}, crmLast: undefined});
         connectionNotice = "";
+        offline=false;
+        return identify(priorWorkspace);
       } else if (input?.mode === "synthetic") {
         if(!isolatedProfile)throw new Error('Проверочная база доступна только в отдельном проверочном профиле.');
         if (!["employee", "manager", "observer","courier","analyst"].includes(input.role))

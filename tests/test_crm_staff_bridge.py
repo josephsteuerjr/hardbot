@@ -117,7 +117,7 @@ def test_staff_session_rechecks_same_entry_device_revocation_and_roster(crm_worl
         return identity
     sessions = shared_auth.Sessions(secrets.token_bytes(32), verify, clock=lambda: clock[0], audit=lambda *_: None)
     result = asyncio.run(sessions.exchange(token, kind='employee'))
-    request = SimpleNamespace(headers={'Authorization':'Bearer '+result['token']})
+    request = SimpleNamespace(method='GET',path='/api/crm/context',headers={'Authorization':'Bearer '+result['token']})
     assert asyncio.run(sessions.authenticate(request)).role == 'employee'
     active[0] = False
     clock[0] += shared_auth.AUTHORITY_CACHE_SECONDS

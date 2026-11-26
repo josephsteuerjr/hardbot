@@ -92,6 +92,9 @@ def replay(conn, principal, operation, body):
             )
         result = json.loads(row["result_json"])
         if principal.access_model == 2 and result.get('grant_id') != principal.grant_id:
+            if (principal.recover_legacy_receipt and 'grant_id' not in result and
+                    result.get('operation_id') == operation and result.get('status') == 'accepted' and result.get('event_id')):
+                return dict(ok=True, status='accepted', operation_id=operation, event_id=result['event_id'])
             raise CRMError('Операция принадлежит другому полномочию.', 'grant_required', 409)
         return result
     return None

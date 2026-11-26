@@ -5,6 +5,7 @@ No production connection or weakening of the pinned-origin constructors.
 """
 import asyncio,os,time,uuid
 import aiohttp
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient,TestServer
 import accounts,db
@@ -210,7 +211,46 @@ def test_shared_exchange_forwards_only_the_explicit_grant_header():
     asyncio.run(run())
 
 
-def test_mobile_grant_switch_keeps_person_owner_and_rejects_stale_envelope(tmp_path):
+@pytest.mark.parametrize('bound_commands,expected_calls', [(False,['context','command']), (True,['command'])])
+def test_mobile_queue_sends_without_extra_context_when_api_checks_binding(tmp_path,bound_commands,expected_calls):
+    calls = []
+
+    class Backend(SharedBackend):
+        async def json(self,url,method='GET',headers=None,body=None):
+            action = url.rsplit('/',1)[-1]
+            calls.append((action,headers or {}))
+            if action=='login':
+                return dict(action='ok',token='fixture',role='agent',username='synthetic')
+            if action=='crm-identity':
+                return dict(me=dict(role='employee'))
+            if action=='exchange':
+                return dict(token='session',access_model=1)
+            if action=='context':
+                return dict(role='employee',actor_uid=101,employee_uuid='synthetic',access_model=1,
+                            bound_commands=bound_commands)
+            if action=='command':
+                return dict(status='accepted',operation_id=body['operation_id'])
+            raise AssertionError(action)
+
+    async def run():
+        backend = Backend('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-pilot')
+        async with TestClient(TestServer(create_app(backend,tmp_path/'mobile',key=os.urandom(32)))) as client:
+            boot=await (await client.get('/mobile/boot')).json()
+            headers={'X-CRM-CSRF':boot['csrf']}
+            assert (await client.post('/mobile/login',headers=headers,json=dict(username='synthetic',password='synthetic'))).status==200
+            active=await (await client.get('/mobile/boot')).json()
+            calls.clear()
+            operation=str(uuid.uuid4())
+            answer=await client.post('/mobile/api',headers={'X-CRM-CSRF':active['csrf']},
+                json=dict(method='POST',action='command',body=dict(operation_id=operation)))
+            assert answer.status==200 and (await answer.json())['operation_id']==operation
+            assert [item[0] for item in calls]==expected_calls
+            assert calls[-1][1].get('X-CRM-Work-Authority') == ('101/1/' if bound_commands else None)
+
+    asyncio.run(run())
+
+
+def test_mobile_grant_switch_isolates_work_and_rejects_stale_envelope(tmp_path):
     contexts={
         'grant-manager':dict(actor_uid=303,employee_uuid='person-one',role='manager',capabilities=['assign','exchange'],workspace=dict(defaultModule='portfolio',tree=[dict(id='portfolio',children=[]),dict(id='team',children=[])])),
         'grant-analyst':dict(actor_uid=303,employee_uuid='person-one',role='analyst',capabilities=['exchange'],workspace=dict(defaultModule='registry',tree=[dict(id='registry',children=[]),dict(id='exchange',children=[])])),
@@ -251,7 +291,7 @@ def test_mobile_grant_switch_keeps_person_owner_and_rejects_stale_envelope(tmp_p
             response=await client.post('/mobile/api',headers=headers,json=dict(method='POST',action='grant',body=dict(grant_id='grant-analyst')))
             assert response.status==200,await response.text()
             analyst=await (await client.get('/mobile/boot')).json()
-            assert analyst['session']['owner']==owner
+            assert analyst['session']['owner']!=owner
             assert analyst['session']['context']['role']=='analyst'
             assert analyst['session']['context']['grant_id']=='grant-analyst'
             assert analyst['session']['context']['workspace']['defaultModule']=='registry'
@@ -264,7 +304,7 @@ def test_mobile_grant_switch_keeps_person_owner_and_rejects_stale_envelope(tmp_p
             store.job(owner,identifier,dict(access_model=2,actor_uid=303,grant_id='grant-manager',receipt=dict(receipt_id=identifier),receipt_state='pending'))
             response=await client.post('/mobile/receipts',headers=headers,json=dict(action='flush'))
             entries=(await response.json())['entries']
-            assert entries[0]['code']=='grant_changed' and receipts==[]
+            assert not entries and not receipts
             await client.post('/mobile/api',headers=headers,json=dict(method='POST',action='grant',body=dict(grant_id='grant-manager')))
             manager=await (await client.get('/mobile/boot')).json();headers={'X-CRM-CSRF':manager['csrf']}
             response=await client.post('/mobile/receipts',headers=headers,json=dict(action='flush'))

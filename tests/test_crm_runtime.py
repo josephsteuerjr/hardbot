@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 from crm import runtime,shared_auth,storage,assignments,primary_fence
 from crm.contract import CRMError
@@ -22,6 +23,8 @@ def test_restart_finishes_job_but_live_revocation_stops_each_pack(crm_world,monk
     with storage.connect() as c:
         sealed=c.execute('SELECT sealed FROM crm_background_credentials').fetchone()[0]
         assert token not in sealed
+        assert not sealed.startswith('{')
+    assert asyncio.run(service().background_principal(sealed)) == p
     with pytest.raises(CRMError):asyncio.run(service().background_principal(issued['token'][5:]))
     with pytest.raises(CRMError):service().open('crm1.'+sealed.rstrip('='))
     restarted=service()
@@ -49,7 +52,6 @@ def test_invalid_primary_is_visible_in_service_status(crm_world,monkeypatch):
 def test_report_uses_fresh_team_at_next_slot_without_polling_idle_credentials(crm_world,monkeypatch):
     from dataclasses import replace
     from datetime import datetime,timedelta,timezone
-    import json
     from crm import manager_reports,three_hour
     w,_=setup(crm_world,monkeypatch);primary_fence.activate(w['contracts']);p=w['managers'][0]
     manager_reports.read(p)
@@ -63,6 +65,7 @@ def test_report_uses_fresh_team_at_next_slot_without_polling_idle_credentials(cr
     with storage.connect() as c:
         authority=json.loads(c.execute("SELECT authority_json FROM crm_background_authorities WHERE kind='report'").fetchone()[0])
         assert w['target'] in authority['employee_scope']
+        assert not {'grants','access_model','policy_revision','grant_id'}.intersection(authority)
         assert manager_reports.pending(c)==[]
 
 

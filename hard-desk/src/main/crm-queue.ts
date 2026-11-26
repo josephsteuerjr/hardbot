@@ -25,8 +25,9 @@ export type Transport = (
   action: string,
   body?: any,
   query?: any,
+  binding?: AuthorityBinding,
 ) => Promise<Result>;
-export type AuthorityBinding = {actor_uid?: number|string; access_model?: number; grant_id?: string|null};
+export type AuthorityBinding = {actor_uid?: number|string; access_model?: number; grant_id?: string|null; bound_commands?: boolean; recover_legacy_receipt?: boolean};
 type Entry = AuthorityBinding & {
   action?: "command" | "receipt" | "registry-edit" | "active-time";
   body: any;
@@ -172,6 +173,26 @@ export function importSoftQueue(owner:string){
   if(merged!==queue){write(name,merged);changed(owner);}
 }
 
+export function carryLegacyWork(previousOwner: string, owner: string, authority: AuthorityBinding) {
+  if (previousOwner === owner) return;
+  const marker = 'work-transfer-' + digest(owner);
+  if (read(marker, () => null)) return;
+  const previous = business(previousOwner);
+  if (previous.entries.some(entry => entry.actor_uid !== undefined &&
+      String(entry.actor_uid) !== String(authority.actor_uid))) {
+    throw Error('Прежняя очередь содержит работу разных входов и требует сверки.');
+  }
+  const entries = previous.entries.map(entry => ({
+    ...entry, actor_uid: authority.actor_uid, access_model: authority.access_model, grant_id: authority.grant_id,
+    recover_legacy_receipt: authority.access_model === 2 && (!entry.action || entry.action === 'command'),
+  }));
+  const current = business(owner);
+  const merged = mergeBusinessQueues(current, {schema:1, owner, entries});
+  if (merged !== current) write(queueName(owner), merged);
+  write(marker, {source:previousOwner});
+  changed(owner);
+}
+
 export function mergeBusinessQueues(queue:Business,previous:Business):Business{
   if(previous.owner!==queue.owner)throw Error('Прежняя очередь принадлежит другой учётной записи.');
   const entries=new Map(queue.entries.map(entry=>[entryId(entry.body),entry]));
@@ -253,24 +274,30 @@ export function flush(
   if (running.has(owner)) return running.get(owner)!;
   const work = async () => {
     if (current() !== owner) return;
-    // Access is freshly checked before each replay. Cached cards never authorize a write.
-    const context = await send("GET", "context");
-    if (!context.ok || current() !== owner || !authorityMatches(authority?.(),context.data)) return;
-    for (const snapshot of business(owner).entries.filter(
-      (e) => e.state === "pending",
-    )) {
+    const entries = business(owner).entries.filter(entry => entry.state === "pending");
+    if (!entries.length) return;
+    const expected = authority?.();
+    const bound = expected?.bound_commands === true && expected.actor_uid !== undefined && expected.access_model !== undefined;
+    // Older servers still need the fresh context check. Current servers verify
+    // the exact work authority while admitting the operation itself.
+    const context = bound ? {ok:true,data:expected} : await send("GET", "context");
+    if (!context.ok || current() !== owner || !authorityMatches(expected,context.data)) return;
+    for (const snapshot of entries) {
       if (current() !== owner) return;
       if(authority && !authorityMatches(snapshot,context.data))continue;
       const response = await send(
         "POST",
         snapshot.action || "command",
         snapshot.body,
+        undefined,
+        bound ? {...expected,recover_legacy_receipt:snapshot.recover_legacy_receipt} : undefined,
       );
       if (current() !== owner) return;
       if (
         response.status === 0 ||
         response.status === 408 ||
         response.status === 429 ||
+        response.data?.error === 'grant_changed' ||
         response.status >= 500
       )
         return;
@@ -405,7 +432,9 @@ export function draft(owner: string, key: string, value?: any): any {
   const name = "draft-" + digest(owner + "\n" + key);
   if (value !== undefined) write(name, value, key === "active-open" ? directSealCheckpoint : undefined);
   else if(owner&&key!=='live-cursor'&&!existsSync(path(name))){
-    const source=softProfileFile(name);
+    const moved = read<{source:string}|null>('work-transfer-' + digest(owner), () => null);
+    const old = moved ? path('draft-' + digest(moved.source + '\n' + key)) : undefined;
+    const source=old && existsSync(old) ? old : softProfileFile(name);
     if(source){
       const draft=readAt(source,()=>null);
       if(draft!==null)write(name,draft,key==='active-open'?directSealCheckpoint:undefined);

@@ -151,7 +151,9 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
     def bind_owner(session):
         context=session['context']
         origin='synthetic://'+str(home) if backend.synthetic else public_origin or backend.crm
-        identity=str(context['actor_uid']) if context.get('access_model')==2 else context['employee_uuid']
+        identity=str(context.get('actor_uid',context['employee_uuid']))
+        if context.get('access_model')==2:
+            identity+='\n'+context['grant_id']
         session['owner']='mobile:'+hashlib.sha256((origin+'\n'+identity).encode()).hexdigest()
     def operation_binding(session):
         context=session['context']
@@ -176,14 +178,17 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         if str(context['actor_uid'])!=str(session['context']['actor_uid']) or context['employee_uuid']!=session['context']['employee_uuid']:
             sessions.forget(request['mobile_sid'])
             raise CRMError('Вход изменился. Исходная работа сохранена.','identity_changed',401)
-        session['role']=context['role'];bind_owner(session)
+        replaced = session['context']!=context
+        previous_owner = session['owner']
+        session['role']=context['role']
+        session['context']=context
+        bind_owner(session)
         upgraded=False
         if 'lifetime_seconds' not in session:
             session['expires_at']+=(SESSION_SECONDS-LEGACY_SESSION_SECONDS)*1000
             session['lifetime_seconds']=SESSION_SECONDS
             upgraded=True
-        if upgraded or session['context']!=context:
-            session['context']=context
+        if upgraded or replaced or previous_owner!=session['owner']:
             sessions.write(session,request['mobile_sid'])
         return session
     async def boot(request):
@@ -203,6 +208,16 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         if not session.get('pending'):bind_owner(session)
         sid=sessions.write(session,replaces=request['mobile_sid'])
         response=web.json_response(dict(ok=True));cookie(response,sid,request,session);return response
+    async def registration(request):
+        if backend.synthetic:
+            raise CRMError('Регистрация доступна в рабочей CRM.','synthetic',403)
+        if request.method=='GET':
+            return web.json_response(await backend.registration())
+        if request.content_length is None or request.content_length>4096:
+            raise CRMError('Недопустимый размер запроса.','size',413)
+        body=await request.json()
+        if not isinstance(body,dict):raise CRMError('Ожидается заявка на регистрацию.','invalid',400)
+        return web.json_response(await backend.registration(body),status=201)
     async def resume(request):
         if backend.synthetic:
             raise CRMError('Перенос входа доступен в рабочей CRM.', 'synthetic', 403)
@@ -241,14 +256,22 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
                 raise CRMError('Полномочие принадлежит другому входу.','identity_changed',401)
             bind_owner(session);sessions.write(session,request['mobile_sid'])
             return web.json_response(data)
-        session=await authorize(request,refresh=method=='POST' or action in {'context','manager-access'})
+        from .shared_auth import BOUND_ACTIONS
+        session=await authorize(request,refresh=False)
+        bound = method=='POST' and action in BOUND_ACTIONS and session['context'].get('bound_commands')
+        if (method=='POST' and not bound) or action in {'context','manager-access'}:
+            session=await authorize(request)
         expected_grant=body.get('grant_id')
         if expected_grant is not None and expected_grant!=session['context'].get('grant_id'):
             raise CRMError('Полномочие изменилось. Исходная операция сохранена.','grant_changed',409)
         if method=='GET' and action=='context':
             return web.json_response(session['context'])
         before=json.dumps(session,ensure_ascii=False,sort_keys=True)
-        data=await backend.request(session,method,action,body.get('body') or {},body.get('query') or {})
+        if bound and action=='command' and body.get('recover_legacy_receipt') is True:
+            data=await backend.request(session,method,action,body.get('body') or {},body.get('query') or {},
+                                       recover_legacy_receipt=True)
+        else:
+            data=await backend.request(session,method,action,body.get('body') or {},body.get('query') or {})
         if json.dumps(session,ensure_ascii=False,sort_keys=True)!=before:
             sessions.write(session,request['mobile_sid'])
         return web.json_response(data)
@@ -449,6 +472,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
     async def health(request):return web.json_response(dict(ok=True,service='crm-mobile',executor='python-xlsxwriter' if isinstance(getattr(backend,'executor',None),ServerExecutor) else 'windows' if isinstance(getattr(backend,'executor',None),WindowsExecutor) else 'synthetic' if backend.synthetic else 'unconfigured'))
     app.router.add_get(prefix+'health',health)
     app.router.add_get(prefix+'boot',boot);app.router.add_post(prefix+'login',login);app.router.add_post(prefix+'logout',logout)
+    app.router.add_get(prefix+'registration',registration);app.router.add_post(prefix+'registration',registration)
     app.router.add_post(prefix+'resume',resume)
     app.router.add_post(prefix+'password',password)
     app.router.add_get(prefix+'receipts',receipts);app.router.add_post(prefix+'receipts',receipts)

@@ -243,6 +243,8 @@ def test_country_mismatch_stale_preview_and_atomic_assignment(crm_world):
 @pytest.mark.parametrize('case', [test_pool_delivery_call_reassignment_and_export,
                                   test_country_mismatch_stale_preview_and_atomic_assignment])
 def test_logistics_pipeline_on_postgres(pg_world, case):
+    with storage.connect() as conn:
+        conn.execute((Path(__file__).parents[1] / 'tools/crm_runtime_permissions.sql').read_text())
     case(pg_world)
 
 

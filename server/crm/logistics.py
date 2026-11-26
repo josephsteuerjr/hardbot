@@ -297,10 +297,13 @@ def apply(principal, body):
             raise CRMError('В выбранном периоде нет новых подтверждённых договоров.')
         ids = [row['contract_uuid'] for row in eligible]
         primary_fence.require_contracts(conn, ids)
-        for row in eligible:
-            if row['courier_uuid']:
-                conn.execute("INSERT OR IGNORE INTO crm_logistics_staff(country,work,employee_uuid) VALUES(?,?,?)",
-                             (body['source']['country'], 'delivery', row['courier_uuid']))
+        country = body['source']['country']
+        for employee in sorted({row['courier_uuid'] for row in eligible if row['courier_uuid']}):
+            if storage.is_postgres(conn):
+                conn.execute('SELECT crm_enroll_delivery_courier(?,?)', (country, employee))
+            else:
+                conn.execute("INSERT INTO crm_logistics_staff(country,work,employee_uuid) VALUES(?,'delivery',?) "
+                             "ON CONFLICT DO NOTHING", (country, employee))
         at = now()
         columns = ('contract_uuid', 'country', 'workbook_sha256', 'courier_label', 'courier_uuid',
                    'transferred_on', 'phone')

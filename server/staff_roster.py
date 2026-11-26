@@ -95,7 +95,7 @@ def rows(conn, *, active_only=True):
         + ('WHERE r.active=1 ' if active_only else '') + 'ORDER BY r.office,i.display_name')]
 
 
-def candidates(conn):
+def candidates(conn, *, registry=None):
     """Keep roster decisions and add new owners from the current portfolios.
 
     Both the public picker and self-registration use this function. An import
@@ -123,7 +123,7 @@ def candidates(conn):
     for row in conn.execute('SELECT employee,city FROM employee_city'):
         offices.setdefault(db._name_key(row['employee']), set()).add(row['city'] or '')
     additions = {}
-    for row in conn.execute(
+    for row in (conn if registry is None else registry).execute(
             "SELECT responsible employee, 'hard' product FROM clients WHERE TRIM(COALESCE(responsible,''))<>'' "
             "UNION SELECT responsible_soft employee, 'soft' product FROM clients WHERE TRIM(COALESCE(responsible_soft,''))<>'' "
             "ORDER BY employee,product"):

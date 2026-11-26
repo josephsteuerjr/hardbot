@@ -8,6 +8,7 @@ from .contract import CRMError, canonical, now
 
 def remember(actor_uid,sealed,grant_id=None):
     with storage.connect() as conn:
+        storage.begin(conn, [f'background-credential:{actor_uid}'])
         row=conn.execute('SELECT sealed FROM crm_background_credentials WHERE actor_uid=?',(actor_uid,)).fetchone()
         slots={}
         if row:
@@ -17,9 +18,11 @@ def remember(actor_uid,sealed,grant_id=None):
             except (ValueError,TypeError):
                 slots['']=row['sealed']
         slots[grant_id or '']=sealed
+        # Keep the pre-grant format readable by the previous report worker.
+        payload=slots[''] if slots.keys()=={''} else json.dumps(slots,separators=(',',':'))
         conn.execute('INSERT INTO crm_background_credentials VALUES(?,?,?) ON CONFLICT(actor_uid) '
             'DO UPDATE SET sealed=excluded.sealed,updated_at=excluded.updated_at',
-            (actor_uid,json.dumps(slots,separators=(',',':')),now()))
+            (actor_uid,payload,now()))
 
 
 def credentials():

@@ -184,6 +184,12 @@ class SharedBackend:
             return value
     def headers(self,session):return {session['credential_header']:session['credential'],
                                       'X-CRM-Entry':'analyst' if session.get('entry_role',session['role'])=='analyst' else 'manager'}
+    async def registration(self,body=None):
+        if body is None:return await self.json(self.primary+'/api/account/crm-registration')
+        payload={key:body.get(key) for key in ('role','employee','username','password','country','city','code')}
+        payload.update(audience='crm-mobile',device=dict(kind='phone',fp=body.get('device_id'),
+                                                        label=body.get('device_label','Мобильная CRM')))
+        return await self.json(self.primary+'/api/account/crm-registration','POST',body=payload)
     async def login(self,body):
         value=await self.json(self.primary+'/api/account/login','POST',body=dict(username=body.get('username'),password=body.get('password'),device=dict(kind='phone',fp=body.get('device_id'),label=body.get('device_label','Мобильная CRM')),entrance='crm-mobile',audience='crm-mobile',gps=body.get('gps')))
         if value.get('action') not in {'ok','ok_pending'}:raise CRMError(value.get('error') or 'Вход не выполнен.','login',403)
@@ -252,7 +258,7 @@ class SharedBackend:
         try:await self.json(self.primary+'/api/account/logout','POST',headers=self.headers(session),body={})
         except CRMError as exc:
             if exc.status not in {401,403,410}:raise
-    async def request(self,session,method,action,body=None,query=None):
+    async def request(self,session,method,action,body=None,query=None,*,recover_legacy_receipt=False):
         from urllib.parse import urlencode
         if action in {'field-route','field-geocode','field-directions','field-marks','field-track'}:
             return await self.field_workspace(session,method,action,body or {},query or {})
@@ -283,12 +289,20 @@ class SharedBackend:
                     else:scope.require_username(team,payload.get('username'))
             return await self.json(self.primary+routes[resource],method,self.headers(session),payload if method=='POST' else None)
         if action not in (GET_ACTIONS if method=='GET' else POST_ACTIONS):raise CRMError('Неизвестный запрос.')
+        from .shared_auth import BOUND_ACTIONS
+        context = session.get('context') or {}
+        headers = {}
+        if method == 'POST' and action in BOUND_ACTIONS and context.get('bound_commands'):
+            headers['X-CRM-Work-Authority'] = f"{context['actor_uid']}/{context['access_model']}/{context.get('grant_id') or ''}"
+            if action == 'command' and recover_legacy_receipt:
+                headers['X-CRM-Recover-Legacy'] = '1'
+        url = self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else '')
         try:
-            value=await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
+            value=await self.json(url,method,{'Authorization':'Bearer '+session['crm_session'],**headers},body)
         except CRMError as exc:
             if exc.code not in {'pilot_session_expired','pilot_session_invalid'}:raise
             await self.exchange(session)
-            value=await self.json(self.crm+'/api/crm/'+action+('?' + urlencode(query) if query else ''),method,{'Authorization':'Bearer '+session['crm_session']},body)
+            value=await self.json(url,method,{'Authorization':'Bearer '+session['crm_session'],**headers},body)
         return self.context(session,value) if action=='context' else value
 
     async def field_workspace(self,session,method,action,body,query):

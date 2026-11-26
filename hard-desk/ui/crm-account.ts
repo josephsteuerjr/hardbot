@@ -1,3 +1,5 @@
+import {mountRegistration} from './crm-registration';
+
 /** Windows account entry. Passwords stay in the form only until the request ends. */
 export function mountAccount(host:HTMLElement,crm:any,account:any,connected:boolean,refresh:(action:string)=>Promise<void>) {
   const esc=(s:any)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -6,8 +8,9 @@ export function mountAccount(host:HTMLElement,crm:any,account:any,connected:bool
     host.querySelector('#account-switch')!.addEventListener('click',()=>mountAccount(host,crm,account,false,refresh));
     return;
   }
+  const approver=['manager','full','analyst','security'].includes(account?.role)?'администратором':'руководителем';
   host.innerHTML=`<section class="account-entry"><h2>${account?.available?'Вход в CRM':'Войти в CRM'}</h2>
-    ${account?.available?`<p>${esc(account.username)}</p>${account.must_change_password?`<form id="account-password"><div class="grid"><label class="field">Временный пароль<input name="current" type="password" autocomplete="current-password" required></label><label class="field">Новый пароль<input name="new" type="password" autocomplete="new-password" required></label><label class="field">Повторите новый пароль<input name="repeat" type="password" autocomplete="new-password" required></label></div><button class="primary">Сменить пароль</button></form>`:`${account.pending?'<p>Устройство ожидает подтверждения руководителем.</p>':''}<button id="account-status" class="primary">${connected?'Проверить вход':'Продолжить'}</button>`}<button id="account-logout">Выйти из учётной записи</button>`:
+    ${account?.available?`<p>${esc(account.username)}</p>${account.must_change_password?`<form id="account-password"><div class="grid"><label class="field">Временный пароль<input name="current" type="password" autocomplete="current-password" required></label><label class="field">Новый пароль<input name="new" type="password" autocomplete="new-password" required></label><label class="field">Повторите новый пароль<input name="repeat" type="password" autocomplete="new-password" required></label></div><button class="primary">Сменить пароль</button></form>`:`${account.pending?`<p>Устройство ожидает подтверждения ${approver}.</p>`:''}<button id="account-status" class="primary">${connected?'Проверить вход':'Продолжить'}</button>`}<button id="account-logout">Выйти из учётной записи</button>`:
     `<form id="account-login"><div class="grid"><label class="field">Логин<input name="username" autocomplete="username" value="${esc(account?.username)}" required></label><label class="field">Пароль<input name="password" type="password" autocomplete="current-password" required></label></div><button class="primary">Войти</button></form>`}
     <p id="account-message" role="status">${esc(account?.error||'')}</p></section>`;
   let busy=false;
@@ -36,4 +39,5 @@ export function mountAccount(host:HTMLElement,crm:any,account:any,connected:bool
   });
   host.querySelector('#account-status')?.addEventListener('click',()=>void run('account-status'));
   host.querySelector('#account-logout')?.addEventListener('click',()=>void run('account-logout'));
+  if(!account?.available)mountRegistration(host,crm);
 }

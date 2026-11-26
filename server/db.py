@@ -1549,6 +1549,8 @@ def init_db() -> None:
         # поэтому вызов строго ПОСЛЕ их создания выше.
         import accounts
         accounts.init_schema(conn)
+        import crm_registration
+        crm_registration.init_schema(conn)
         import staff_roster
         import pc_registration
         staff_roster.init_schema(conn)

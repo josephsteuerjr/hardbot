@@ -146,7 +146,9 @@ def cmd_entered(args: argparse.Namespace) -> int:
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
-    result = accounts.approve_account(args.username, by=args.by or "admin-cli")
+    import crm_registration
+    by=args.by or 'admin-cli'
+    result = crm_registration.approve(args.username,by) or accounts.approve_account(args.username,by=by)
     if not result.get("ok"):
         _out("ОТКАЗ: " + result.get("error", ""))
         return 1
@@ -154,6 +156,16 @@ def cmd_approve(args: argparse.Namespace) -> int:
         _out(f"Аккаунт открыт. Подтверждения: {', '.join(result.get('approvals', []))}")
     else:
         _out(result.get("error", "Нужно ещё подтверждение администратора."))
+    return 0
+
+
+def cmd_registration_code(args: argparse.Namespace) -> int:
+    import crm_registration
+    try:
+        _out(crm_registration.issue_employee_code(args.employee,hours=args.hours))
+    except ValueError as exc:
+        _out(str(exc))
+        return 1
     return 0
 
 
@@ -235,6 +247,11 @@ def main() -> int:
     p.add_argument("--by", default="admin-cli",
                    help="имя администратора для двухподтверждений (по умолчанию admin-cli)")
     p.set_defaults(func=cmd_approve)
+
+    p=sub.add_parser('registration-code',help='личный одноразовый код регистрации сотрудника')
+    p.add_argument('--employee',required=True)
+    p.add_argument('--hours',type=int,default=24)
+    p.set_defaults(func=cmd_registration_code)
 
     p = sub.add_parser("approve-device")
     p.add_argument("--id", type=int, required=True)

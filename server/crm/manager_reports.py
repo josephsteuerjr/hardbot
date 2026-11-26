@@ -36,7 +36,10 @@ def report_work_id(p):
 def remember_authority(conn, principal, work_id, kind):
     value=asdict(principal)
     for key in ('capabilities','employee_scope'):value[key]=sorted(value[key])
-    value['grants']=()
+    if principal.access_model == 1:
+        for key in ('grants','access_model','policy_revision','grant_id'):value.pop(key)
+    else:
+        value['grants']=()
     conn.execute('INSERT INTO crm_background_authorities VALUES(?,?,?,?,?) '
                  'ON CONFLICT(work_id) DO UPDATE SET authority_json=excluded.authority_json,updated_at=excluded.updated_at',
                  (work_id,principal.actor_uid,kind,canonical(value),now()))

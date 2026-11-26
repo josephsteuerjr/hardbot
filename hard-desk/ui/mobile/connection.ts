@@ -12,6 +12,8 @@ const connectionStatus=(response:any,connected:boolean,pending:any)=>{
   if(response.status>=500)return {title:'Сервер временно недоступен',text:'Не повторяйте отправку вслепую. Проверьте «Отправки» и повторите позже — локальные данные сохранены.'};
   return {title:'Подключение не подтверждено',text:response.text||'Проверьте вход и повторите. Локальные данные сохранены.'};
 };
+import {mountRegistration} from '../crm-registration';
+
 export async function mountConnection(host:HTMLElement,crm:any,boot:()=>Promise<any>){
   const response=await boot();
   const state=await crm.state();
@@ -38,6 +40,7 @@ export async function mountConnection(host:HTMLElement,crm:any,boot:()=>Promise<
   const safe=(fn:()=>Promise<any>)=>async()=>{try{feedback.textContent='';await fn();}catch(e){feedback.textContent=(e as Error).message;feedback.scrollIntoView({block:'nearest'});}};
   host.querySelectorAll<HTMLButtonElement>('[data-mobile-role]').forEach(b=>b.onclick=safe(async()=>{b.disabled=true;const r=await crm.connect({action:'synthetic',role:b.dataset.mobileRole});if(!r.ok){b.disabled=false;throw Error(r.text||'Вход не выполнен.');}}));
   const form=host.querySelector<HTMLFormElement>('#mobile-login');
+  if(form){const holder=document.createElement('div');form.after(holder);mountRegistration(holder,crm);}
   if(form)form.onsubmit=e=>{e.preventDefault();void safe(async()=>{const b=form.querySelector<HTMLButtonElement>('[type=submit]')!,data=new FormData(form);b.disabled=true;try{const r=await crm.connect({action:'login',username:data.get('username'),password:data.get('password')});if(!r.ok)throw Error(r.text||'Вход не выполнен.');}finally{b.disabled=false;}})();};
   host.querySelectorAll<HTMLFormElement>('[data-mobile-password]').forEach(form=>{form.onsubmit=e=>{e.preventDefault();void safe(async()=>{
     const data=new FormData(form),b=form.querySelector<HTMLButtonElement>('[type=submit]')!;

@@ -113,6 +113,8 @@ def install(app, host=None, *, authenticate=None):
             capabilities=sorted(p.capabilities),
             owner=p.owner,
             server_operator=p.server_operator,
+            account_bound=p.account_bound,
+            bound_commands=authenticate is not None,
             read_all_contracts=access.reads_all(p),
             access_model=p.access_model,
             policy_revision=p.policy_revision,

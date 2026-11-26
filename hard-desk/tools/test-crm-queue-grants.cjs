@@ -31,5 +31,23 @@ const send=async(method,action,payload)=>{
   assert.equal(posts.length,0,'Unbound legacy entry must stay pending in grant model 2');
   const states=Object.fromEntries(queue.queueState(owner).entries.map(entry=>[entry.body.operation_id,entry.state]));
   assert.equal(states[unbound.operation_id],'pending');
-  console.log(JSON.stringify({passed:true,defaultSwitchBlocked:true,exactGrantAccepted:true,unboundEntryBlocked:true}));
+  const old='synthetic\nperson',next='synthetic\nperson\n303\ngrant-b';
+  const legacy={operation_id:crypto.randomUUID(),kind:'note'};
+  queue.enqueue(old,legacy,'command',{actor_uid:303,access_model:1});
+  queue.draft(old,'legacy-form',{note:'retain old draft'});
+  const newBinding={actor_uid:303,access_model:2,grant_id:'grant-b',bound_commands:true};
+  queue.carryLegacyWork(old,next,newBinding);
+  assert.equal(queue.draft(next,'legacy-form').note,'retain old draft');
+  assert.equal(queue.draft(owner,'legacy-form'),null);
+  await queue.flush(next,async(method,action,payload,query,expected)=>{
+    assert.equal(method,'POST');assert.equal(action,'command');
+    assert.equal(expected.grant_id,'grant-b');assert.equal(expected.recover_legacy_receipt,true);
+    assert.equal(payload.operation_id,legacy.operation_id);
+    return {ok:true,status:200,data:{operation_id:legacy.operation_id,status:'accepted'}};
+  },()=>next,()=>newBinding);
+  queue.carryLegacyWork(old,next,newBinding);
+  assert.equal(queue.queueState(next).entries.length,1);
+  assert.equal(queue.queueState(next).entries[0].state,'accepted');
+  console.log(JSON.stringify({passed:true,defaultSwitchBlocked:true,exactGrantAccepted:true,unboundEntryBlocked:true,
+    migratedDraft:true,legacyOperationIdRetained:true,additionalContextRequests:0}));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>fs.rmSync(temp,{recursive:true,force:true}));

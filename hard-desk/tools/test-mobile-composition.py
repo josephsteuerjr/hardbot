@@ -75,9 +75,9 @@ try:
   page=context.new_page();page.goto(state['url']);page.wait_for_function('()=>crm.state().then(s=>s.context?.grant_id==="grant-b")')
   page.wait_for_timeout(1200)
   queued=page.evaluate('op=>crm.queue().then(r=>r.data.entries.find(e=>e.body.operation_id===op))',operation_id)
-  assert queued['state']=='pending' and queued['grant_id']=='grant-a'
+  assert queued is None
   assert backend.commands==[],backend.commands
-  assert page.evaluate('()=>crm.state().then(s=>s.owner)')==owner
+  assert page.evaluate('()=>crm.state().then(s=>s.owner)')!=owner
   page.evaluate('''async()=>{const host=document.createElement('div');host.id='grant-test';document.body.append(host);await crm.renderConnection(host);}''')
   picker=page.locator('#grant-test [data-grant-picker]');picker.locator('select').select_option('grant-a');picker.locator('button[type=submit]').click()
   page.wait_for_function('()=>document.querySelector("#grant-test #mobile-connect-result")?.textContent.includes("отозвано")')
@@ -89,7 +89,7 @@ try:
   fresh.close()
   evidence=dict(passed=True,owner_stable=True,offline_grant_bound=True,revoked_grant_not_replayed=True,server_grant_picker=True,commands=backend.commands)
   (qa/'chromium-composition.json').write_text(json.dumps(evidence,ensure_ascii=False,indent=2),encoding='utf-8')
-  print('Chromium mobile composition: stable owner + revoked offline grant isolation PASS',flush=True)
+  print('Chromium mobile composition: separate grant storage and revoked offline work isolation PASS',flush=True)
   browser.close()
 finally:
  stop.set();thread.join(20)

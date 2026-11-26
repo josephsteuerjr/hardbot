@@ -249,7 +249,8 @@ def create_account(employee: str, username: str, password: str, *, office: str =
                    telegram_id: int | None = None, self_service: bool = False,
                    registration_gps: dict | None = None, registration_ip: str = "",
                    registration_pc: dict | None = None,
-                   registration_device: dict | None = None, _connection=None) -> dict:
+                   registration_device: dict | None = None, _connection=None,
+                   _registration_roster=None) -> dict:
     """Завести аккаунт. Роль по умолчанию agent (сотрудник Хард/Софт).
     Руководителям/аналитику нужен внутренний номер пользователя (легаси-поле
     зовётся telegram_id, но Телеграм не используется): берётся из managers
@@ -287,7 +288,7 @@ def create_account(employee: str, username: str, password: str, *, office: str =
                 if device.get('kind') != 'phone' or not 8 <= len(fp) <= 256:
                     return {"ok": False, "error": "Для регистрации с телефона нужна заявка телефона. На ПК используйте программу."}
                 phone = {'fingerprint': fp, 'label': str(device.get('label') or 'Телефон')[:120]}
-            roster = staff_roster.candidates(conn)
+            roster = staff_roster.candidates(conn) if _registration_roster is None else _registration_roster
             names = {r['employee'] for r in roster}
             matches = [name for name in names if db._name_key(name) == db._name_key(employee)]
             if len(matches) != 1:
@@ -692,7 +693,7 @@ def login(username: str, password: str, *, device: dict, entrance: str,
             conn.execute("UPDATE account_devices SET gps=?,gps_seen_at=? WHERE id=?",
                          (gps_text, datetime.now(timezone.utc).isoformat() if gps_text else None, dev['id']))
         verified_entry = bool(pc) if device_kind == 'desktop' else audience in ('mobile', 'crm-mobile')
-        paused = verified_entry and account_policy.device_confirmation_paused(conn)
+        paused = row['role']=='agent' and verified_entry and account_policy.device_confirmation_paused(conn)
         if paused and row['role']=='agent' and row['status']=='awaiting' and row['password_review_pending'] and row['password_reset_operation'] and row['password_reset_actor']:
             actor = 'policy:device-confirmation-paused'
             conn.execute("UPDATE accounts SET status='active',password_review_pending=0,activated_by=?,activated_at=?,updated_at=? WHERE id=?",
@@ -724,6 +725,9 @@ def login(username: str, password: str, *, device: dict, entrance: str,
             'WHERE account_id=? AND kind=? AND consumed_at IS NULL',(row['id'],device_kind)).fetchone()
         reset_next=bool(reset_grant and row['role'] in ('manager','security','full'))
         first_privileged = row['role'] in PRIVILEGED and row['status']=='active' and (not ever or root_next or reset_next)
+        if first_privileged and not (root_next or reset_next) and conn.execute(
+                'SELECT 1 FROM crm_registration_requests WHERE account_id=?', (row['id'],)).fetchone():
+            first_privileged = False
         if audience=='crm-mobile' and row['role']=='analyst' and device_kind=='phone':
             first_privileged=False  # New analyst phones require explicit device approval.
         if dev['status']=='pending' and first_privileged:
@@ -1302,7 +1306,9 @@ def admin_accounts() -> list[dict]:
             requests = [{k: v for k, v in dict(r).items() if k != "id"}
                         for r in sorted({r["id"]: r for r in [*recent, *live]}.values(),
                                         key=lambda r: r["id"], reverse=True)]
+            request = conn.execute('SELECT country,city FROM crm_registration_requests WHERE account_id=?', (acc['id'],)).fetchone()
             out.append({"id": acc["id"], "username": acc["username"], "actor_uid": acc["telegram_id"],
+                        "registration_scope": dict(request) if request and acc['role']=='manager' else None,
                         "owner_root": bool(conn.execute("SELECT 1 FROM account_admin_grants WHERE account_id=? AND granted_by='ssh-root'", (acc['id'],)).fetchone()),
                         "employee": acc["employee"], "office": acc["office"] or "",
                         "created_by": acc["created_by"] or "",
