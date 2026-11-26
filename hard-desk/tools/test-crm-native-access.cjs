@@ -48,5 +48,16 @@ requireScopedManagerMutation(scoped,'reset',{username:'allowed'},team);
 requireScopedManagerMutation(scoped,'revoke',{device_id:55},team);
 check('scoped admin permits account list',scopedAdminActionAllowed(scoped,'local',['/admin',{method:'GET',path:'/admin/accounts.json'}]));
 check('scoped admin denies broad import',!scopedAdminActionAllowed(scoped,'local',['/enr/apply',{}]));
-check('scoped account response is filtered',filterScopedAdminResult(scoped,'local',['/admin',{method:'GET',path:'/admin/accounts.json'}],{accounts:[{username:'allowed',actor_uid:101},{username:'outside',actor_uid:202}]}).accounts.length===1);
+const accountRequest=['/admin',{method:'GET',path:'/admin/accounts.json'}];
+const accountReply={ok:true,data:{approver:'Global approver',password_review_owner:true,accounts:[
+  {username:'allowed',employee:'Allowed person',actor_uid:101},
+  {username:'outside',employee:'Allowed person',actor_uid:202},
+  {username:'unknown',employee:'Allowed person'},
+]}};
+const scopedReply=filterScopedAdminResult(scoped,'local',accountRequest,accountReply);
+assert.deepEqual(scopedReply.data.accounts.map(account=>account.username),['allowed']);
+assert.equal(scopedReply.data.approver,'');
+assert.equal(scopedReply.data.password_review_owner,false);
+check('legacy account reply is unchanged',filterScopedAdminResult(legacy('analyst',['exchange']),'local',accountRequest,accountReply)===accountReply);
+check('unexpected account reply fails closed',!filterScopedAdminResult(scoped,'local',accountRequest,{ok:true,accounts:accountReply.data.accounts}).ok);
 console.log(JSON.stringify({passed:true,checks:checks.length,ownerFeatures:features.length,legacyFallback:true,selectedGrantRoleCapabilityWorkspace:true,crossGrantDenied:true}));

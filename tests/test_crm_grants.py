@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from crm import access, grants, schema, shared_auth, storage
+from crm import access, grants, schema, shared_auth, shared_server, storage
 from crm.contract import CRMError, canonical
 from crm.roles import GRANT_ROLE_CAPABILITIES, ROLE_CAPABILITIES
-from test_crm_core import crm_world
+from test_crm_core import call_body, crm_world
 
 
 def identity(world, role='employee', uid=None):
@@ -71,6 +71,53 @@ def test_explicit_opt_in_preserves_legacy_authority_and_returns_grants(crm_world
     assert exchange['grants'][0]['territory'] == 'self'
     request = SimpleNamespace(headers={'Authorization': 'Bearer ' + exchange['token']})
     assert asyncio.run(sessions.authenticate(request)).grant_id == after.grant_id
+
+
+def test_legacy_and_grant_clients_share_http_service(crm_world):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    namespace()
+    legacy_token = 'synthetic-legacy-client-credential'
+    grant_token = 'synthetic-grant-client-credential'
+    legacy_actor = identity(crm_world)
+    grant_actor = identity(crm_world, uid=crm_world['stranger'].actor_uid)
+    with storage.connect() as conn:
+        first = grants.upsert(conn, grant_actor['uid'], role='employee', territory='self', capabilities={'call'})
+        grants.upsert(conn, grant_actor['uid'], role='employee', territory='team', capabilities={'visit'})
+        grants.set_model(conn, grant_actor['uid'], 2)
+
+    async def verify(token, *, kind, device_fingerprint):
+        assert kind == 'employee' and device_fingerprint == ''
+        return {legacy_token: legacy_actor, grant_token: grant_actor}[token]
+
+    async def run():
+        sessions = shared_auth.Sessions(b'g' * 32, verify, audit=lambda *_: None)
+        async with TestClient(TestServer(shared_server.create_app(sessions=sessions))) as client:
+            response = await client.post('/auth/exchange', headers={'X-App-Token': legacy_token})
+            assert response.status == 200
+            legacy = await response.json()
+            assert legacy['access_model'] == 1 and legacy['grant_id'] is None
+            old_headers = {'Authorization': 'Bearer ' + legacy['token']}
+            assert (await (await client.get('/api/crm/context', headers=old_headers)).json())['employee_uuid'] == legacy['employee_uuid']
+            command = call_body(crm_world)
+            response = await client.post('/api/crm/command', headers=old_headers, json=command)
+            assert response.status == 200, await response.text()
+            accepted = await response.json()
+
+            response = await client.post('/auth/exchange', headers={'X-App-Token': grant_token})
+            assert response.status == 409 and (await response.json())['error'] == 'grant_required'
+            response = await client.post('/auth/exchange', headers={'X-App-Token': grant_token, 'X-CRM-Grant': first.grant_id})
+            assert response.status == 200
+            chosen = await response.json()
+            new_headers = {'Authorization': 'Bearer ' + chosen['token']}
+            context = await (await client.get('/api/crm/context', headers=new_headers)).json()
+            assert context['access_model'] == 2 and context['grant_id'] == first.grant_id
+            response = await client.get('/api/crm/card', headers=new_headers, params={'person_uuid': crm_world['person']})
+            assert response.status in (403, 404)
+            response = await client.post('/api/crm/command', headers=old_headers, json=command)
+            assert response.status == 200 and (await response.json()) == accepted
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('territory', ['self', 'employees', 'team', 'all'])

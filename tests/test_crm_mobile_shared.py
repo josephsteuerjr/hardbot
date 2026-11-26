@@ -448,11 +448,16 @@ def test_scoped_admin_proxy_allows_only_safe_reads_and_filters_accounts():
     class Executor:
         async def admin(self,session,path,body):
             if path=='/state':return dict(ok=True,data=dict(busy=False))
-            return dict(ok=True,accounts=[dict(username='allowed',actor_uid=101),dict(username='outside',actor_uid=202)])
+            return dict(ok=True,data=dict(approver='Global approver',password_review_owner=True,accounts=[
+                dict(username='allowed',employee='Allowed person',actor_uid=101),
+                dict(username='outside',employee='Allowed person',actor_uid=202),
+                dict(username='unknown',employee='Allowed person'),
+            ]))
     backend=SharedBackend('https://hard.rimborso.ru','https://hard.rimborso.ru/crm-shared-pilot',Executor())
     async def run():
         result=await backend.admin(session,'/admin',dict(method='GET',path='/admin/accounts.json'))
-        assert [row['username'] for row in result['accounts']]==['allowed']
+        assert [row['username'] for row in result['data']['accounts']]==['allowed']
+        assert result['data']['approver']=='' and result['data']['password_review_owner'] is False
         try:
             await backend.admin(session,'/enr/apply',{})
             raise AssertionError('Scoped admin reached broad import')

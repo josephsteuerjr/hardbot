@@ -66,6 +66,22 @@ def change(principal, row, **values):
         selection=[dict(contract_uuid=row['contract_uuid'], revision=row['revision'])],values=values))
 
 
+def test_legacy_manager_signin_opens_only_the_logistics_workspace(crm_world):
+    from crm import access, workspace
+
+    setup(crm_world)
+    principal = shared_auth.principal({'uid': 304, 'role': 'manager', 'server_operator': True})
+    assert principal.role == 'logistic' and principal.capabilities == {'logistics'}
+    assert not access.reads_all(principal) and not principal.server_operator
+    menu = workspace.manifest(principal)
+    assert menu['defaultModule'] == 'logistics'
+    assert [module['id'] for module in menu['tree']] == ['logistics', 'connection']
+    assert logistics.read(principal, country='TJ')['total'] == 0
+    with pytest.raises(CRMError) as denied:
+        logistics.read(principal, country='UZ')
+    assert denied.value.status == 403
+
+
 def test_pool_delivery_call_reassignment_and_export(crm_world):
     w=crm_world
     logist, other_logist, courier=setup(w)

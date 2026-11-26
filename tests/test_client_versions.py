@@ -101,7 +101,10 @@ def test_existing_session_records_upgrade_without_relogin_and_keeps_history(worl
     # A restart and schema initialization preserve observations.
     db.init_db()
     assert rows() == observed
-    devices = accounts.admin_accounts()[0]['devices']
+    listed = accounts.admin_accounts()[0]
+    with db.connect() as conn:
+        assert listed['actor_uid'] == conn.execute('SELECT telegram_id FROM accounts WHERE id=?',(listed['id'],)).fetchone()[0]
+    devices = listed['devices']
     assert devices[0]['client']['client_version'] == '3.2.8'
     assert len(devices[0]['client_versions']) == 2
     assert 'token_id' not in json.dumps(devices[0]['client_versions'])

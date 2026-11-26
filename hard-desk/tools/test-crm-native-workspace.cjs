@@ -95,8 +95,13 @@ const ownerContext=context=>({...context,role:'owner',owner:true,capabilities:[]
 
   await connect('manager',selected('manager',['assign'],['team'],{access_model:2,grant_id:'narrow-manager'}));
   assert((await access()).ok,'Scoped manager access uses the scoped proxy');
-  await connect('analyst',selected('analyst',['exchange'],['exchange'],{access_model:2,grant_id:'narrow-analyst'}));
-  assert((await admin()).ok,'Scoped admin permits filtered account reads');
+  const analystGrant={access_model:2,grant_id:'narrow-analyst'};
+  await connect('analyst',selected('analyst',['exchange'],['exchange'],{...analystGrant,staff:[{actor_uids:[91005]}]}));
+  const allowedAccounts=await admin();
+  assert(allowedAccounts.ok,'Scoped admin permits filtered account reads');
+  assert.deepEqual(allowedAccounts.data.accounts.map(account=>account.actor_uid),[91005]);
+  transform=selected('analyst',['exchange'],['exchange'],{...analystGrant,staff:[{actor_uids:[90999]}]});
+  assert.deepEqual((await admin()).data.accounts,[],'The real helper reply uses freshly confirmed territory');
   await connect('analyst',context=>ownerContext({...context,access_model:2,grant_id:'global-owner'}));
   assert((await admin()).ok,'Global owner retains legacy administration');
   const grantCatalog=await js('window.crm.api("GET","grant-catalog")');

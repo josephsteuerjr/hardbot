@@ -534,7 +534,7 @@ async function mountWorkspaceModule(route:string,moduleContext:ModuleContext):Pr
   await handler();
 }
 async function boot(openWork=false) {
-  await crm.ready?.();
+  if(crm.platform==='mobile')await crm.ready?.();
   state = await crm.state();
   if(!state || state.ok===false || !state.connection)throw Error(state?.text || 'Не удалось прочитать защищённый профиль CRM.');
   document.title=state.product||'Взыскание';
@@ -576,7 +576,9 @@ async function boot(openWork=false) {
     state.connection.mode === "synthetic" ? "Синтетические данные" :
     state.connection.mode === 'unconfigured' ? 'Нужен вход · данные сохранены' : 'Связь есть · '+state.connection.server;
   if(!workspaceHost)workspaceHost=createWorkspaceHost();
-  await workspaceHost.open(currentWorkspaceManifest(),context?section:'connection');
+  const opening=workspaceHost.open(currentWorkspaceManifest(),context?section:'connection');
+  if(workspaceHost.currentRoute && crm.platform!=='mobile')void crm.ready?.().catch(reportError);
+  await opening;
   section=workspaceHost.currentRoute||section;
   const initialPerson=crm.initialPerson?.();if(context&&initialPerson)await openCard(initialPerson);
   telemetry("client_ready", "shell", {
@@ -1952,4 +1954,5 @@ void boot().catch((e) => {
   $('connection').textContent='Вход не подтверждён';
   $('view').innerHTML=`<p>Сохранённые данные остаются ${savedOn}. Повторите запуск после восстановления доступа.</p><button id="retry-start" class="primary">Повторить запуск</button>`;
   $('retry-start').onclick=()=>location.reload();
+  if(crm.platform!=='mobile')void crm.ready?.().catch(reportError);
 });

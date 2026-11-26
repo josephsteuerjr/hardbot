@@ -17,13 +17,13 @@ import {AnalystRuntime} from './crm-analyst-runtime';
 import { pilotCredential,pilotGrantCandidates } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
 import {ActiveTime} from './crm-active-time';
-import {showStartupRecovery} from './crm-startup-recovery';
+import {currentRecoveryWindow,showStartupRecovery} from './crm-startup-recovery';
 import {applyCrmWindowFrame} from './crm-window-frame';
 import {CrmLive} from './crm-live';
 import {FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
 import {accountAction,accountState,adoptSoftAccount,markAccountLoginRequired,savedAccountFingerprint} from './crm-account';
 import {checkUpdates,installUpdate,startUpdates,updateState} from './updates';
-import {filterScopedAdminResult,filterScopedManagerPlan,filterScopedManagerTeam,legacyAdministrationAllowed,nativeCapability,requireScopedManagerMutation,scopedAdminActionAllowed} from './crm-native-access';
+import {filterScopedManagerPlan,filterScopedManagerTeam,legacyAdministrationAllowed,nativeCapability,requireScopedManagerMutation} from './crm-native-access';
 
 const isolatedProfile = !!process.env.HARD_USER_DATA;
 const product = STABLE_CRM ? FIXED_PRODUCT! : PRODUCTS.crm;
@@ -78,15 +78,37 @@ function diagnostic(stage:string,code:string,ok:boolean,extra:Record<string,numb
 let helperRepair:Promise<void>|null=null,helperAttempts:number[]=[],rendererReady=false,lastConfirmedAt:string|null=null;
 let tray: Tray | null = null;
 let quitting = false;
+let windowPrepared = false, startupFailed = false;
+let showWhenReady = !process.argv.includes('--tray');
+let rendererDeadline: ReturnType<typeof setTimeout> | undefined;
 function currentWindow(): BrowserWindow | null {
   return win && !win.isDestroyed() && !win.webContents.isDestroyed() ? win : null;
 }
 function showWindow() {
-  const current = currentWindow();
+  if (quitting) return;
+  showWhenReady = true;
+  const current = currentRecoveryWindow() || (windowPrepared && rendererReady && !startupFailed ? currentWindow() : null);
   if (!current) return;
   if (current.isMinimized()) current.restore();
   current.show();
   current.focus();
+}
+function startupRecovery(code:string) {
+  if (quitting || startupFailed) return;
+  startupFailed = true;
+  clearTimeout(rendererDeadline);
+  currentWindow()?.hide();
+  diagnostic('startup',code,false);
+  void showStartupRecovery(code);
+}
+function waitForRenderer(window:BrowserWindow) {
+  if (quitting || startupFailed || currentWindow() !== window) return;
+  rendererReady = false;
+  window.hide();
+  clearTimeout(rendererDeadline);
+  rendererDeadline = setTimeout(() => {
+    if (!rendererReady && currentWindow() === window) startupRecovery('preload_or_renderer_unavailable');
+  },10_000).unref();
 }
 let screenLocked=false, sleeping=false;
 const activeTime=new ActiveTime(()=>{
@@ -473,19 +495,26 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
       throw Error('Сервер не выдал полномочие администрирования в этом рабочем месте.');
     const employee = currentContext.employee_uuid;
     const previousActor = currentContext.actor_uid;
+    const model = currentContext.access_model ?? 1;
+    const grant = currentContext.grant_id;
+    const revision = currentContext.policy_revision;
     const source = entrySource();
     const fingerprint = demo() ? '' : entryFingerprint(source);
     const valid = () => expected === owner && nativeCapability(currentContext,'admin')
-      && currentContext.employee_uuid === employee && (demo() || (entrySource() === source && entryFingerprint(source) === fingerprint));
+      && currentContext.employee_uuid === employee && currentContext.actor_uid === previousActor
+      && (currentContext.access_model ?? 1) === model && currentContext.grant_id === grant && currentContext.policy_revision === revision
+      && (demo() || (entrySource() === source && entryFingerprint(source) === fingerprint));
     const result = await send('GET','context');
-    if (!result.ok || !nativeCapability(result.data,'admin') || result.data.employee_uuid !== employee || !valid())
+    if (!result.ok || !nativeCapability(result.data,'admin') || result.data.employee_uuid !== employee || !valid()
+      || (result.data.access_model ?? 1) !== model || result.data.grant_id !== grant
+      || (previousActor !== undefined && result.data.actor_uid !== previousActor))
       throw Error('Сервер не подтвердил полномочия администрирования.');
     const ownerAccess = result.data.owner === true;
     let actor = result.data.actor_uid;
     if(demo()){
       const endpoint=await local('analyst-admin-init',{});
       if(!endpoint.ok || !Number.isSafeInteger(actor) || !actor || !valid())throw Error('Полномочие администрирования изменилось.');
-      return {owner:expected,...endpoint.data,actor,current:valid};
+      return {owner:expected,...endpoint.data,actor,context:result.data,current:valid};
     }
     if (!shared() || !(ownerAccess ? ['manager','analyst','crm'] : ['analyst','crm']).includes(source))
       throw Error('Подключите вход с подтверждённым полномочием администрирования.');
@@ -509,7 +538,7 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
     }
     if (!Number.isSafeInteger(actor) || !actor || (previousActor !== undefined && previousActor !== actor) || !valid())
       throw Error('Изменилась личность администратора.');
-    return {owner:expected,actor,url:'https://hard.rimborso.ru',
+    return {owner:expected,actor,context:result.data,url:'https://hard.rimborso.ru',
       token:(login.kind==='analyst'?'account:':'')+login.credential,fingerprint,
       existingProfile: STABLE_CRM && product.id === 'analyst' && source === 'analyst' && !isolatedProfile, profileUrl:login.profileUrl,current:valid};
   }});
@@ -780,7 +809,15 @@ app
       installation_id: queue.installation(),
       activity:{clock_quality:clock?'anchored':'unconfirmed',idle_threshold_seconds:120,last_confirmed_at:lastConfirmedAt},
     }));
-    safeHandler('crm:ui-ready',()=>{rendererReady=true;diagnostic('renderer','renderer_ready',true);return {ok:true};});
+    safeHandler('crm:ui-ready',()=>{
+      if (!startupFailed && !rendererReady) {
+        rendererReady=true;
+        clearTimeout(rendererDeadline);
+        diagnostic('renderer','renderer_ready',true);
+        if (showWhenReady) showWindow();
+      }
+      return {ok:true};
+    });
     safeHandler('crm:update',async(action:string)=>{
       if(action==='state')return updateState();
       if(action==='check')return checkUpdates();
@@ -800,13 +837,8 @@ app
       update=>{if(win&&!win.isDestroyed())win.webContents.send('crm:update-state',update);},
       ()=>diagnostic('update','update_check_failed',false)
     );
-    safeHandler('crm:admin',async(action:string,args:any[],expected:string)=>{
-      if(!scopedAdminActionAllowed(currentContext,action,args))
-        return {ok:false,status:403,text:'Для этой полномочия доступны только чтение состояния и список аккаунтов в его территории.'};
-      const result=await analystRuntime.request(action,args,expected);
-      return filterScopedAdminResult(currentContext,action,args,result);
-    });
-    safeHandler('crm:diagnostics',async(repair:boolean=false)=>{rendererReady=true;return diagnostics(repair===true);});
+    safeHandler('crm:admin',(action:string,args:any[],expected:string)=>analystRuntime.request(action,args,expected));
+    safeHandler('crm:diagnostics',async(repair:boolean=false)=>diagnostics(repair===true));
     safeHandler('crm:diagnostics-report',async()=>{
       const choice=await dialog.showSaveDialog(win!,{title:'Диагностика CRM',defaultPath:'CRM-диагностика-'+Date.now()+'.json',filters:[{name:'JSON',extensions:['json']}]});
       if(choice.canceled || !choice.filePath)return {ok:true,cancelled:true};
@@ -1264,15 +1296,29 @@ app
         current.isMaximized() ? current.unmaximize() : current.maximize();
     });
     const startupWindow = win;
-    await startupWindow.loadURL("hard://app/index.html");
-    if (quitting || startupWindow.isDestroyed()) return;
+    const contents = startupWindow.webContents;
     let rendererRepairs=0;
-    win.webContents.on('render-process-gone',()=>{
-      diagnostic('renderer','renderer_stopped',false);
-      if(++rendererRepairs<=2){rendererReady=false;win?.webContents.reload();}
-      else void showStartupRecovery('renderer_unavailable');
+    contents.on('did-start-navigation',event=>{
+      if(event.isMainFrame && !event.isSameDocument)waitForRenderer(startupWindow);
     });
-    setTimeout(()=>{if(!rendererReady && win && !win.isDestroyed())void showStartupRecovery('preload_or_renderer_unavailable');},10000).unref();
+    contents.on('preload-error',()=>startupRecovery('preload_failed'));
+    contents.on('render-process-gone',()=>{
+      if(quitting || startupFailed || currentWindow()!==startupWindow)return;
+      diagnostic('renderer','renderer_stopped',false);
+      if(++rendererRepairs>2){startupRecovery('renderer_unavailable');return;}
+      waitForRenderer(startupWindow);
+      setImmediate(()=>{
+        if(!quitting && !startupFailed && currentWindow()===startupWindow)contents.reload();
+      });
+    });
+    startupWindow.once('closed',()=>{win=null;clearTimeout(rendererDeadline);});
+    waitForRenderer(startupWindow);
+    try { await startupWindow.loadURL("hard://app/index.html"); }
+    catch {
+      if (currentWindow()===startupWindow)startupRecovery('main_document_failed');
+      return;
+    }
+    if (quitting || startupFailed || currentWindow()!==startupWindow) return;
     const framed=await applyCrmWindowFrame(startupWindow);
     if (quitting || startupWindow.isDestroyed()) return;
     diagnostic('window',framed?'window_frame_applied':'window_frame_unavailable',framed);
@@ -1295,14 +1341,15 @@ app
           } else app.quit();
         }}
       ]));
-      win.on('close', event => {
-        if (!quitting && !installingUpdate) { event.preventDefault(); win?.hide(); }
+      startupWindow.on('close', event => {
+        if (!quitting && !installingUpdate) { event.preventDefault(); showWhenReady=false; startupWindow.hide(); }
       });
-      win.on('minimize', () => { if (!quitting) win?.hide(); });
+      startupWindow.on('minimize', () => { if (!quitting) { showWhenReady=false; startupWindow.hide(); } });
     }
-    if (!tray || !process.argv.includes('--tray')) win.show();
-    win.on('blur',()=>activeTime.stop());win.on('hide',()=>activeTime.stop());
-    win.on('minimize',()=>activeTime.stop());win.on('close',()=>activeTime.stop());
+    windowPrepared = true;
+    if (!tray || showWhenReady)showWindow();
+    startupWindow.on('blur',()=>activeTime.stop());startupWindow.on('hide',()=>activeTime.stop());
+    startupWindow.on('minimize',()=>activeTime.stop());startupWindow.on('close',()=>activeTime.stop());
     powerMonitor.on('lock-screen',()=>{screenLocked=true;activeTime.stop();});
     powerMonitor.on('unlock-screen',()=>{screenLocked=false;});
     powerMonitor.on('suspend',()=>{sleeping=true;activeTime.stop();clock=null;});
@@ -1331,11 +1378,7 @@ app
     }, 7000).unref();
 
   })
-  .catch((error) => {
-    if(quitting || win?.isDestroyed())return;
-    diagnostic('startup','startup_failed',false);
-    void showStartupRecovery('startup_failed');
-  });
+  .catch(() => startupRecovery('startup_failed'));
 app.on("second-instance", (_event, argv) => { if (!argv.includes('--tray')) showWindow(); });
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => {

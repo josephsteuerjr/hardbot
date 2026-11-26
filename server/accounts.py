@@ -1302,7 +1302,7 @@ def admin_accounts() -> list[dict]:
             requests = [{k: v for k, v in dict(r).items() if k != "id"}
                         for r in sorted({r["id"]: r for r in [*recent, *live]}.values(),
                                         key=lambda r: r["id"], reverse=True)]
-            out.append({"id": acc["id"], "username": acc["username"],
+            out.append({"id": acc["id"], "username": acc["username"], "actor_uid": acc["telegram_id"],
                         "owner_root": bool(conn.execute("SELECT 1 FROM account_admin_grants WHERE account_id=? AND granted_by='ssh-root'", (acc['id'],)).fetchone()),
                         "employee": acc["employee"], "office": acc["office"] or "",
                         "created_by": acc["created_by"] or "",

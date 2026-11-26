@@ -24,7 +24,7 @@ async function run(){
   let win;
   try{
     await app.whenReady();
-    await until(()=>{win=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()==='hard://app/index.html');return win;},'CRM window');
+    await until(()=>{win=BrowserWindow.getAllWindows().find(w=>w.isVisible()&&w.webContents.getURL()==='hard://app/index.html');return win;},'visible CRM window');
     const js=code=>win.webContents.executeJavaScript(code,true);
     const exists=selector=>js('!!document.querySelector('+JSON.stringify(selector)+')');
     const click=selector=>js('document.querySelector('+JSON.stringify(selector)+').click()');
@@ -131,7 +131,8 @@ async function run(){
       courierOfflineDelivery:true,observerReadOnly:true},null,2));
     app.quit();
   }catch(error){
-    if(win){fs.writeFileSync(path.join(qa,'failure.png'),(await win.webContents.capturePage()).toPNG());fs.writeFileSync(path.join(qa,'failure.txt'),String(error)+'\n'+await win.webContents.executeJavaScript('document.body.innerText'));}
+    fs.writeFileSync(path.join(qa,'failure.txt'),error.stack||String(error));
+    if(win?.isVisible())try{fs.writeFileSync(path.join(qa,'failure.png'),(await win.webContents.capturePage()).toPNG());}catch{}
     console.error(error);app.exit(1);
   }
 }

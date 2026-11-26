@@ -117,10 +117,14 @@ export function scopedAdminActionAllowed(context:any,action:string,args:any[]):b
   return path==='/state'||path==='/busy'||path==='/admin'&&body.method==='GET'&&body.path==='/admin/accounts.json';
 }
 export function filterScopedAdminResult(context:any,action:string,args:any[],result:any):any {
-  if(action==='local'&&args[0]==='/admin'&&(args[1]||{}).path==='/admin/accounts.json'&&!legacyAdministrationAllowed(context)&&result?.accounts){
-    return {...result,accounts:result.accounts.filter((account:any)=>scopedAccountAllowed(context,account))};
-  }
-  return result;
+  const body=args[1];
+  if(legacyAdministrationAllowed(context)||action!=='local'||args[0]!=='/admin'||body?.method!=='GET'||body.path!=='/admin/accounts.json'||!result?.ok)
+    return result;
+  const data=result.data;
+  if(!Array.isArray(data?.accounts))return {ok:false,error:'Служба входа вернула неполный список аккаунтов.'};
+  const actors=new Set<number>((context.staff||[]).flatMap((person:any)=>person.actor_uids||[]));
+  return {...result,data:{...data,approver:'',password_review_owner:false,
+    accounts:data.accounts.filter((account:any)=>actors.has(account?.actor_uid))}};
 }
 
 export function nativeCapability(context: any, capability: NativeCapability): boolean {

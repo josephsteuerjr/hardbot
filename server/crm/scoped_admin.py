@@ -71,9 +71,14 @@ def require_safe_admin(session,path,body):
 
 
 def filter_safe_admin_result(session,path,body,result):
-    if path=='/admin' and body.get('method')=='GET' and body.get('path')=='/admin/accounts.json' and isinstance(result,dict):
-        scope=scoped(session)
-        if scope is not None:
-            result=dict(result)
-            result['accounts']=[dict(account) for account in result.get('accounts',()) if scope.account(account)]
-    return result
+    if path!='/admin' or body.get('method')!='GET' or body.get('path')!='/admin/accounts.json':
+        return result
+    scope=scoped(session)
+    if scope is None or not isinstance(result,dict) or not result.get('ok'):
+        return result
+    data=result.get('data')
+    if not isinstance(data,dict) or not isinstance(data.get('accounts'),list):
+        return dict(ok=False,error='Служба входа вернула неполный список аккаунтов.')
+    accounts=[account for account in data['accounts'] if isinstance(account,dict)
+              and type(account.get('actor_uid')) is int and account['actor_uid'] in scope.uids]
+    return dict(result,data=dict(data,accounts=accounts,approver='',password_review_owner=False))

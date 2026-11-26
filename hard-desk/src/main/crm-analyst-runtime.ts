@@ -5,8 +5,9 @@ import {createHash} from 'node:crypto';
 import {appendFileSync,existsSync,mkdirSync,writeFileSync} from 'node:fs';
 import {basename,dirname,extname,join,resolve} from 'node:path';
 import {fetchBuffered} from './transport';
+import {filterScopedAdminResult,scopedAdminActionAllowed} from './crm-native-access';
 
-export type AnalystAuthority={owner:string;actor:number;url:string;token:string;fingerprint:string;existingProfile?:boolean;profileUrl?:string;current:()=>boolean};
+export type AnalystAuthority={owner:string;actor:number;url:string;token:string;fingerprint:string;context:any;existingProfile?:boolean;profileUrl?:string;current:()=>boolean};
 type Options={home:string;window:()=>BrowserWindow|null;authorize:(expected:string)=>Promise<AnalystAuthority>;
   writeTable:(report:any,path:string)=>Promise<any>;synthetic:()=>boolean};
 const localRoutes=new Set(['/state','/busy','/fn','/job','/jobs','/admin','/admin_image','/mail/state','/mail/set','/mail/send']);
@@ -81,6 +82,8 @@ export class AnalystRuntime{
   async request(action:string,args:any[],expected:string):Promise<any>{
     if(!Array.isArray(args)||args.length>5)throw Error('Недопустимый запрос Аналитика.');
     const subject=await this.options.authorize(expected);
+    if(!scopedAdminActionAllowed(subject.context,action,args))
+      return {ok:false,status:403,text:'В этом рабочем месте доступны состояние и список аккаунтов в разрешённой области.'};
     if(this.filesOwner!==subject.owner){this.files.clear();this.filesOwner=subject.owner;}
     const confirm=()=>{if(!subject.current())throw Error('Вход Аналитика изменился.');};
     if(action==='local'){
@@ -93,7 +96,7 @@ export class AnalystRuntime{
       await this.start(subject);confirm();
       const result=await this.rpc(path,body);confirm();
       if(path==='/state'&&result.data)delete result.data.settings_path;
-      return result;
+      return filterScopedAdminResult(subject.context,action,args,result);
     }
     if(action==='pick'){
       const [kind,opts={}]=args;
