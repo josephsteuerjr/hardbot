@@ -570,7 +570,7 @@ async function boot(openWork=false) {
       portfolioFiltersOpen=Object.keys(portfolioFilters).length>0;
     }
   }
-  $("identity").textContent = context ? ({manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик',logistic:'Логист'} as any)[context.role] || 'Сотрудник' : 'Вход в CRM';
+  $("identity").textContent = context ? ({owner:'Владелец',manager:'Руководитель',observer:'Наблюдатель',courier:'Курьер',analyst:'Аналитик',logistic:'Логист'} as any)[context.role] || 'Сотрудник' : 'Вход в CRM';
   $("version").textContent = state.version;
   const mobileSignIn = crm.platform === 'mobile' && !context && state.connection.mode !== 'synthetic';
   $("connection").textContent = mobileSignIn ? '' : state.offline ? 'Нет связи · ввод сохранён '+savedOn :
@@ -719,7 +719,8 @@ async function managerTeam(){
   host.innerHTML='<div class="tabs"><button data-team-tab="results" class="active" aria-pressed="true">Результаты</button><button data-team-tab="access" aria-pressed="false">Доступы и устройства</button></div><div id="team-content"></div>';
   const content=host.querySelector<HTMLElement>('#team-content')!;
   const tabs=host.querySelectorAll<HTMLButtonElement>('[data-team-tab]');
-  const api={...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner)};
+  const api={...crm,draft:(key:string,value?:any)=>crm.draft(key,value,expectedOwner),
+    admin:(action:string,args:any[])=>crm.admin(action,args,expectedOwner)};
   let subview=0;
   let stop: (()=>void)|undefined;
   const openPortfolio=async (id:string)=>{
