@@ -6,20 +6,27 @@ import {createHash} from 'node:crypto';
 import {openCrmRecord,sealCrmRecord} from './windows-dpapi';
 import {desktopFingerprint,deviceName,pcLoginProof} from './net';
 import {fetchBuffered} from './transport';
+import {primaryOrigin, confirmRehearsal} from './crm-endpoint';
+import {CRM_REHEARSAL} from './product';
 
-const PRIMARY='https://hard.rimborso.ru';
-type Account={credential:string;kind:'employee'|'manager'|'analyst';role:string;username:string;uid:number;pending:boolean;password:boolean};
+type Account={credential:string;kind:'employee'|'manager'|'analyst';role:string;username:string;uid:number;pending:boolean;password:boolean;origin?:string};
 type AccountRecord=Account|{username:string;login_required:true};
 let generation=0;
 const file=()=>join(app.getPath('userData'),'crm-account.bin');
-function record():AccountRecord{return JSON.parse(openCrmRecord(readFileSync(file())));}
+function record():AccountRecord{
+  const value:AccountRecord=JSON.parse(openCrmRecord(readFileSync(file())));
+  if(CRM_REHEARSAL && !('login_required' in value) && value.origin!==primaryOrigin())
+    throw Object.assign(new Error('Вход относится к прежнему адресу.'),{code:'ENOENT'});
+  return value;
+}
 function read():Account{
   const value=record();
   if('login_required' in value)throw new Error('Войдите в CRM заново.');
   return value;
 }
-function save(value:AccountRecord){writeFileSync(file()+'.tmp',sealCrmRecord(JSON.stringify(value)),{flush:true});renameSync(file()+'.tmp',file());}
+function save(value:AccountRecord){writeFileSync(file()+'.tmp',sealCrmRecord(JSON.stringify(CRM_REHEARSAL ? {...value,origin:primaryOrigin()} : value)),{flush:true});renameSync(file()+'.tmp',file());}
 export function adoptSoftAccount(){
+  if(CRM_REHEARSAL)return;
   const home=process.env.LOCALAPPDATA;
   if(process.platform!=='win32'||!home||app.getPath('userData')!==join(home,'Hard','hard','data')||existsSync(file()))return;
   const source=join(home,'Hard','soft','data','crm-account.bin');
@@ -62,7 +69,7 @@ export function accountState(){
   catch(error){return {available:false as const,...((error as any).code==='ENOENT'?{}:{error:'Не удалось прочитать сохранённый вход. Войдите заново.'})};}
 }
 async function request(path:string,body?:unknown,credential?:Account){
-  const response=await fetchBuffered((url,init)=>net.fetch(url,init),PRIMARY+path,{
+  const response=await fetchBuffered((url,init)=>net.fetch(url,init),primaryOrigin()+path,{
     method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Client-Version':app.getVersion(),
       ...(credential?.kind === 'analyst' ? {'X-CRM-Entry':'analyst'} : {}),
       ...(credential?{[credential.kind==='employee'?'X-App-Token':'X-Pult-Token']:credential.credential}:{} )},
@@ -72,12 +79,13 @@ async function request(path:string,body?:unknown,credential?:Account){
   return result;
 }
 export async function accountAction(action:string,input:any){
+  if(action==='account-register'||action==='account-login')await confirmRehearsal();
   if(action==='account-registration-options')return {ok:true,data:await request('/api/account/crm-registration')};
   if(action==='account-register'){
     const username=String(input.username||'').trim().toLowerCase();
     const employee=String(input.employee||'').trim().replace(/\s+/g,' ');
     const password=String(input.password||'');
-    const pc_proof=await pcLoginProof(PRIMARY,username,password,employee);
+    const pc_proof=await pcLoginProof(primaryOrigin(),username,password,employee);
     const data=await request('/api/account/crm-registration',{role:input.role,employee,username,password,
       country:input.country,city:input.city,code:input.code,pc_proof,audience:'crm-desktop'});
     return {ok:true,data};
@@ -86,7 +94,7 @@ export async function accountAction(action:string,input:any){
   const current=()=>{if(mine!==generation)throw new Error('Вход изменён. Повторите действие.');};
   if(action==='account-login'){
     const username=String(input.username||'').trim(),password=String(input.password||'');
-    const proof=await pcLoginProof(PRIMARY,username,password);current();
+    const proof=await pcLoginProof(primaryOrigin(),username,password);current();
     const value=await request('/api/account/login',{username,password,audience:'crm-desktop',entrance:'internal',pc_proof:proof,
       device:{kind:'desktop',fp:desktopFingerprint(),label:deviceName()+' · CRM'}});current();
     if(!['ok','ok_pending'].includes(value.action)||!['agent','manager','security','full','analyst'].includes(value.role)||

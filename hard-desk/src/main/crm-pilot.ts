@@ -12,7 +12,7 @@ import {
 } from "./store";
 import { fetchBuffered } from "./transport";
 import * as queue from "./crm-queue";
-import { PILOT_BASE, existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource, entryFingerprint,readExistingManagerSession,readExistingLogin } from "./crm-manager-login";
+import { existingManagerStatus, existingLogins, ENTRY_SOURCES, EntrySource, entryFingerprint,readExistingManagerSession,readExistingLogin } from "./crm-manager-login";
 import {AnalystRuntime} from './crm-analyst-runtime';
 import { pilotCredential,pilotGrantCandidates } from "./crm-pilot-session";
 import {ThreeHourReports} from './crm-report-scheduler';
@@ -20,7 +20,8 @@ import {ActiveTime} from './crm-active-time';
 import {currentRecoveryWindow,showStartupRecovery} from './crm-startup-recovery';
 import {applyCrmWindowFrame} from './crm-window-frame';
 import {CrmLive} from './crm-live';
-import {FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
+import {CRM_REHEARSAL,FIXED_PRODUCT,PRODUCTS,STABLE_CRM} from './product';
+import {primaryOrigin,pilotBase,setRehearsalOrigin} from './crm-endpoint';
 import {accountAction,accountState,adoptSoftAccount,markAccountLoginRequired,savedAccountFingerprint} from './crm-account';
 import {checkUpdates,installUpdate,startUpdates,updateState} from './updates';
 import {filterScopedManagerPlan,filterScopedManagerTeam,legacyAdministrationAllowed,nativeCapability,requireScopedManagerMutation} from './crm-native-access';
@@ -29,7 +30,7 @@ const isolatedProfile = !!process.env.HARD_USER_DATA;
 const product = STABLE_CRM ? FIXED_PRODUCT! : PRODUCTS.crm;
 let connectionNotice = "";
 const data =
-  process.env.HARD_USER_DATA ||
+  (!CRM_REHEARSAL && process.env.HARD_USER_DATA) ||
   join(
     process.env.LOCALAPPDATA || app.getPath("appData"),
     "Hard",
@@ -41,7 +42,7 @@ app.setName(product.name);
 app.setPath("userData", data);
 app.setAppUserModelId(product.appId);
 // Stable Hard and Soft keep the same Windows device key they used before CRM.
-if(!STABLE_CRM)process.env.HARD_USER_DATA = data;
+if(!STABLE_CRM||CRM_REHEARSAL)process.env.HARD_USER_DATA = data;
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "hard",
@@ -124,7 +125,7 @@ const config = () =>
   readSettings().crmConnection as
     | { mode?: string; role?: string; server?: string; auth?: string; source?: EntrySource }
     | undefined;
-const shared = () => ['existing-manager', 'existing-login'].includes(config()?.auth || '') && config()?.server === PILOT_BASE;
+const shared = () => ['existing-manager', 'existing-login'].includes(config()?.auth || '') && config()?.server === pilotBase();
 const entrySource = (): EntrySource => config()?.source || 'manager';
 const demo = () => config()?.mode === "synthetic";
 const role = () => config()?.role || "employee";
@@ -246,11 +247,11 @@ async function diagnostics(repair=false){
   if(demo())add('network',!!port,port?'synthetic_ready':'synthetic_unavailable',port?'Проверочная база доступна.':'Проверочная база недоступна.');
   else{
     try{
-      const base=config()?.mode==='remote'?origin():PILOT_BASE;
-      const url=base===PILOT_BASE?base+'/health':new URL('/ready.json',base).toString();
+      const base=config()?.mode==='remote'?origin():pilotBase();
+      const url=base===pilotBase()?base+'/health':new URL('/ready.json',base).toString();
       const result=await fetchBuffered((u,i)=>net.fetch(u,i),url,{method:'GET'},8000);
       const body=await result.json();
-      const ok=result.ok && body.ok===true && (base!==PILOT_BASE || body.namespace==='crm-shared-pilot-v1');
+      const ok=result.ok && body.ok===true && (base!==pilotBase() || body.namespace==='crm-shared-pilot-v1');
       add('network',ok,ok?'api_ready':'api_unavailable',ok?'Публичная проверка API и строгий TLS прошли.':'API не подтвердил готовность или пространство CRM.');
     }catch(error){
       const message=String((error as Error).message);
@@ -394,7 +395,7 @@ const transport: queue.Transport = async (method, action, body, query, binding) 
     const expected = currentContext?.employee_uuid || (previous?.origin === base ? previous.context?.employee_uuid : undefined);
     let token = shared() ? await pilotCredential(expected, false, entrySource(), currentContext?.grant_id || undefined) : role() === "employee" ? readFieldToken() : readToken();
     if (!base || !token) return {ok: false, status: 401, text: "Войдите в CRM."};
-    const url = new URL(shared() ? PILOT_BASE + "/api/crm/" + action : "/api/crm/" + action, base);
+    const url = new URL(shared() ? pilotBase() + "/api/crm/" + action : "/api/crm/" + action, base);
     for (const [key, value] of Object.entries(query || {})) if (value != null) url.searchParams.set(key, String(value));
     const request = (credential: string) => fetchBuffered((target, init) => net.fetch(target, init), url.toString(), {
       method,
@@ -463,7 +464,7 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
     const headers:any={...(analyst&&login.kind==='analyst-device'?{'X-Device-Token':login.credential}:{'X-Pult-Token':login.credential}),
       'Content-Type':'application/json','X-Client-Version':app.getVersion(),
       ...(login.kind==='analyst'?{'X-CRM-Entry':'analyst'}:{}),...(login.deviceFingerprint?{'X-Device-Id':login.deviceFingerprint}:{})};
-    const identity=await fetchBuffered((u,i)=>net.fetch(u,i),analyst?'https://hard.rimborso.ru/api/crm-identity':'https://hard.rimborso.ru/api/manager/device/me',{method:'GET',headers},10000);
+    const identity=await fetchBuffered((u,i)=>net.fetch(u,i),analyst?primaryOrigin()+'/api/crm-identity':primaryOrigin()+'/api/manager/device/me',{method:'GET',headers},10000);
     const subject=await identity.json();
     const confirmed = subject.subject?.actor_uid;
     const confirmedKind=analyst?subject.subject?.type==='analyst'&&subject.me?.role==='analyst':subject.subject?.type==='manager';
@@ -471,10 +472,10 @@ async function managerAccess(method:string,body:any,query:any):Promise<queue.Res
        (actor !== undefined && actor !== confirmed) || authority!==owner || login.fingerprint!==entryFingerprint(entrySource()))
       return {ok:false,status:403,text:'Вход или полномочия изменились. Подключитесь заново.'};
     if(!legacyAdministrationAllowed(currentContext)&&['reset','revoke','approve'].includes(resource)){
-      const teamResponse=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/team',{method:'GET',headers},10000);
+      const teamResponse=await fetchBuffered((u,i)=>net.fetch(u,i),primaryOrigin()+'/api/manager/team',{method:'GET',headers},10000);
       requireScopedManagerMutation(currentContext,resource,body?.payload,filterScopedManagerTeam(currentContext,await teamResponse.json()));
     }else requireScopedManagerMutation(currentContext,resource,body?.payload,undefined);
-    const response=await fetchBuffered((u,i)=>net.fetch(u,i),'https://hard.rimborso.ru/api/manager/'+route[1],
+    const response=await fetchBuffered((u,i)=>net.fetch(u,i),primaryOrigin()+'/api/manager/'+route[1],
       {method,headers,body:method==='POST'?JSON.stringify(body?.payload||{}):undefined},15000);
     const value=await response.json();
     const scoped=resource==='team'?filterScopedManagerTeam(currentContext,value):resource==='plan'?filterScopedManagerPlan(currentContext,value):value;
@@ -524,7 +525,7 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
     if (!(ownerAccess ? ['manager','analyst','analyst-device'] : ['analyst','analyst-device']).includes(login.kind) || login.fingerprint !== fingerprint)
       throw Error('Вход администратора изменился.');
     if (actor === undefined) {
-      const response = await fetchBuffered((url, init) => net.fetch(url,init), 'https://hard.rimborso.ru/api/crm-identity', {
+      const response = await fetchBuffered((url, init) => net.fetch(url,init), primaryOrigin()+'/api/crm-identity', {
         method:'GET', redirect:'error', headers:{
           [login.kind === 'analyst-device' ? 'X-Device-Token' : 'X-Pult-Token']:login.credential,
           ...(login.kind === 'analyst' ? {'X-CRM-Entry':'analyst'} : {}),'X-Client-Version':app.getVersion(),
@@ -540,8 +541,8 @@ const analystRuntime=new AnalystRuntime({home:data,window:()=>win,synthetic:demo
     }
     if (!Number.isSafeInteger(actor) || !actor || (previousActor !== undefined && previousActor !== actor) || !valid())
       throw Error('Изменилась личность администратора.');
-    return {owner:expected,actor,context:result.data,url:'https://hard.rimborso.ru',
-      token:(login.kind==='analyst'?'account:':'')+login.credential,fingerprint,
+    return {owner:expected,actor,context:result.data,url:primaryOrigin(),
+      token:(login.kind==='analyst'||CRM_REHEARSAL?'account:':'')+login.credential,fingerprint,
       existingProfile: STABLE_CRM && product.id === 'analyst' && source === 'analyst' && !isolatedProfile, profileUrl:login.profileUrl,current:valid};
   }});
 
@@ -756,7 +757,7 @@ app
       const fingerprint=savedAccountFingerprint();
       try {
         await pilotCredential(undefined,true,'crm');
-        writeSettings({crmConnection:{mode:'remote',server:PILOT_BASE,source:'crm',auth:'existing-login'}});
+        writeSettings({crmConnection:{mode:'remote',server:pilotBase(),source:'crm',auth:'existing-login'}});
       } catch(error) {
         if(!requireFreshAccountLogin(fingerprint,Number((error as any)?.status)))
           connectionNotice='Сервер CRM недоступен. Повторите подключение, когда появится сеть.';
@@ -773,7 +774,7 @@ app
       if (source) {
         try {
           await pilotCredential(undefined,true,source);
-          writeSettings({crmConnection:{mode:'remote',server:PILOT_BASE,source,auth:'existing-login',
+          writeSettings({crmConnection:{mode:'remote',server:pilotBase(),source,auth:'existing-login',
             role:source==='analyst'||source==='manager'?source:'employee'}});
         } catch { connectionNotice='Сохранённый вход не подтверждён. Проверьте подключение или войдите в CRM.'; }
       }
@@ -815,9 +816,10 @@ app
       },
       grantCandidates: pilotGrantCandidates(),
       context: currentContext,
-      existingManager: existingManagerStatus(),
+      existingManager: CRM_REHEARSAL ? {available:false} : existingManagerStatus(),
       existingLogins: existingLogins(),
       account: accountState(),
+      ...(CRM_REHEARSAL ? {rehearsal: {origin:primaryOrigin()}} : {}),
       testingAllowed: isolatedProfile,
       connectionNotice,
       offline,
@@ -835,6 +837,7 @@ app
       return {ok:true};
     });
     safeHandler('crm:update',async(action:string)=>{
+      if(CRM_REHEARSAL)return action==='state'?updateState():{ok:false,text:'Обновления тестовой CRM устанавливаются отдельно.'};
       if(action==='state')return updateState();
       if(action==='check')return checkUpdates();
       if(action!=='install')throw Error('Неизвестное действие обновления.');
@@ -849,7 +852,7 @@ app
         return result;
       }finally{installingUpdate=false;}
     });
-    if(STABLE_CRM&&!isolatedProfile)startUpdates(
+    if(STABLE_CRM&&!isolatedProfile&&!CRM_REHEARSAL)startUpdates(
       update=>{if(win&&!win.isDestroyed())win.webContents.send('crm:update-state',update);},
       ()=>diagnostic('update','update_check_failed',false)
     );
@@ -982,6 +985,13 @@ app
       return { ok: true };
     });
     safeHandler("crm:connect", async (input: any) => {
+      if(input?.action==='rehearsal-origin'){
+        if(accountState().available||activeRequests>1)throw Error('Перед сменой адреса завершите вход и текущие операции.');
+        const origin=await setRehearsalOrigin(String(input.origin||''),()=>!accountState().available&&activeRequests===1);
+        forgetAuthority('');
+        writeSettings({crmConnection:undefined,crmLast:undefined,crmExplicitEntry:true});
+        return {ok:true,data:{origin}};
+      }
       if(['account-registration-options','account-register'].includes(input?.action))
         return accountAction(input.action,input);
       if (input?.action !== 'offline' && await analystRuntime.busy())
@@ -1008,7 +1018,7 @@ app
             return {ok:true,data:{pending:true}};
           throw error;
         }
-        writeSettings({crmConnection:{mode:'remote',source:'crm',server:PILOT_BASE,auth:'existing-login'}});
+        writeSettings({crmConnection:{mode:'remote',source:'crm',server:pilotBase(),auth:'existing-login'}});
         offline=false;return identify(priorWorkspace);
       }
       if (input?.action === "offline") {
@@ -1022,11 +1032,12 @@ app
         const priorWorkspace = readSettings().crmLast as any;
         forgetAuthority('');
         writeSettings({crmConnection: {mode: "remote", role: source === 'manager' || source === 'analyst' ? source : 'employee', source,
-          server: PILOT_BASE, auth: "existing-login"}, crmLast: undefined});
+          server: pilotBase(), auth: "existing-login"}, crmLast: undefined});
         connectionNotice = "";
         offline=false;
         return identify(priorWorkspace);
       } else if (input?.mode === "synthetic") {
+        if(CRM_REHEARSAL)throw Error('Подключитесь к проверенной копии CRM.');
         if(!isolatedProfile)throw new Error('Проверочная база доступна только в отдельном проверочном профиле.');
         if (!["employee", "manager", "observer","courier","analyst"].includes(input.role))
           throw new Error("Неизвестная роль.");
@@ -1034,6 +1045,7 @@ app
           crmConnection: { mode: "synthetic", role: input.role },
         });
       } else {
+        if(CRM_REHEARSAL)throw Error('Укажите адрес тестовой CRM в разделе «Подключение».');
         const url = new URL(input?.server);
         if (
           url.protocol !== "https:" ||

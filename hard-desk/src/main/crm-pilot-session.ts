@@ -2,7 +2,8 @@ import { app, net } from 'electron';
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { openCrmRecord, sealCrmRecord } from './windows-dpapi';
-import { PILOT_BASE, readExistingLogin, entryFingerprint, EntrySource } from './crm-manager-login';
+import { readExistingLogin, entryFingerprint, EntrySource } from './crm-manager-login';
+import {pilotBase} from './crm-endpoint';
 import { fetchBuffered } from './transport';
 
 type PilotSession = {
@@ -35,7 +36,7 @@ function saved(): PilotSession | null {
 async function exchange(entry: EntrySource, grantId?: string): Promise<PilotSession> {
   const source = readExistingLogin(entry);
   const header = source.kind === 'employee' ? 'X-App-Token' : source.kind === 'analyst-device' ? 'X-Device-Token' : 'X-Pult-Token';
-  const response = await fetchBuffered((url, init) => net.fetch(url, init), PILOT_BASE + '/auth/exchange', {
+  const response = await fetchBuffered((url, init) => net.fetch(url, init), pilotBase() + '/auth/exchange', {
     method: 'POST', headers: {[header]: source.credential, 'X-Client-Version': app.getVersion(),
       ...(source.kind === 'analyst' ? {'X-CRM-Entry': 'analyst'} : {}),
       ...(source.deviceFingerprint ? {'X-Device-Id': source.deviceFingerprint} : {}),

@@ -1821,6 +1821,21 @@ async function connection(host:HTMLElement=document.getElementById('view')!) {
     section='connection';
     await boot(action==='account-login'||(action==='account-status'&&!wasConnected));
   });
+  if(state.rehearsal){
+    const endpoint=document.createElement('form');
+    endpoint.className='rehearsal-endpoint';
+    endpoint.innerHTML=`<div class="field"><label for="rehearsal-origin">Адрес тестовой CRM</label><input id="rehearsal-origin" value="${esc(state.rehearsal.origin)}" type="url" required ${state.account?.available?'disabled':''}></div><button class="link" type="submit" ${state.account?.available?'disabled':''}>Проверить и сохранить</button><div role="status"></div>`;
+    accountHost.before(endpoint);
+    endpoint.onsubmit=async event=>{
+      event.preventDefault();
+      const value=endpoint.querySelector<HTMLInputElement>('input')!.value;
+      const status=endpoint.querySelector<HTMLElement>('[role=status]')!;
+      try{
+        const result=await crm.connect({action:'rehearsal-origin',origin:value});
+        status.textContent=result.ok?'Адрес подтверждён.':result.text||'Сервер недоступен.';
+      }catch(error){status.textContent=String((error as Error).message);}
+    };
+  }
   const savedHeading=[...$('view').querySelectorAll('h2')].find(e=>e.textContent==='Сохранённый вход');
   if(savedHeading){
     const savedDetails=document.createElement('details');savedDetails.className='saved-login-options';

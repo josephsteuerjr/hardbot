@@ -8,6 +8,7 @@ import { join, dirname, resolve, parse } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { directOpen, isDirect, unprotectWindows } from './windows-dpapi';
 import {ownLogin,ownFingerprint} from './crm-account';
+import {CRM_REHEARSAL} from './product';
 
 export const PILOT_BASE = 'https://hard.rimborso.ru/crm-pilot';
 const AUTHORITY_ORIGINS = new Set(['https://hard.rimborso.ru', 'https://hard.rimborso.ru:8080',
@@ -135,6 +136,7 @@ function analystDeviceFingerprint(): string {
 export function readExistingLogin(source: EntrySource): {credential: string; fingerprint: string;
   kind: 'manager' | 'employee' | 'analyst' | 'analyst-device'; deviceFingerprint?: string; profileUrl?:string} {
   if(source==='crm')return ownLogin();
+  if(CRM_REHEARSAL)throw new ManagerLoginError('profile_missing','Используйте учётную запись тестовой CRM.');
   if (source === 'manager') return {...readExistingManagerSession(), kind: 'manager'};
   const profile = entryProfile(source), fingerprint = entryFingerprint(source);
   if (source !== 'analyst') {
@@ -165,6 +167,7 @@ function analystCredentials(profile:string) {
   return value;
 }
 export function existingLogins(): {source: EntrySource; label: string; available: boolean}[] {
+  if(CRM_REHEARSAL)return [{source:'crm',label:ENTRY_LABELS.crm,available: (()=>{try{ownLogin();return true;}catch{return false;}})()}];
   return ENTRY_SOURCES.map(source => {
     try {
       if(source==='crm'){ownLogin();return {source,label:ENTRY_LABELS[source],available:true};}
