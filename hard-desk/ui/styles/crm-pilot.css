@@ -101,6 +101,32 @@ nav button.active {
   background: var(--accent-soft);
   color: var(--accent);
 }
+body:not(.mobile-crm) {
+  grid-template-rows: minmax(0, 1fr);
+}
+body:not(.mobile-crm) #rail {
+  min-height: 0;
+}
+body:not(.mobile-crm) #navigation {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+body:not(.mobile-crm) #navigation > button {
+  flex-shrink: 0;
+}
+body:not(.mobile-crm) #navigation > [data-section="connection"] {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--paper);
+}
+body:not(.mobile-crm) #navigation > [data-section="connection"]:hover {
+  background: var(--ctrl-hover);
+}
+body:not(.mobile-crm) #navigation > [data-section="connection"].active {
+  background: var(--accent-soft);
+}
 footer {
   margin-top: auto;
   padding: 18px 10px 0;

@@ -577,7 +577,12 @@ async function boot(openWork=false) {
     state.connection.mode === "synthetic" ? "Синтетические данные" :
     state.connection.mode === 'unconfigured' ? 'Нужен вход · данные сохранены' : 'Связь есть · '+state.connection.server;
   if(!workspaceHost)workspaceHost=createWorkspaceHost();
-  const opening=workspaceHost.open(currentWorkspaceManifest(),context?section:'connection');
+  const manifest=currentWorkspaceManifest();
+  if(crm.platform!=='mobile'&&manifest.modules){
+    const connection=manifest.modules.find(module=>(typeof module==='string'?module:module.id)==='connection');
+    if(connection)manifest.modules=[connection,...manifest.modules.filter(module=>module!==connection)];
+  }
+  const opening=workspaceHost.open(manifest,context?section:'connection');
   if(workspaceHost.currentRoute && crm.platform!=='mobile')void crm.ready?.().catch(reportError);
   await opening;
   section=workspaceHost.currentRoute||section;

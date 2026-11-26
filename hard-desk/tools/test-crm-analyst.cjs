@@ -28,7 +28,7 @@ async function until(fn,label){fs.appendFileSync(path.join(qa,'stages.txt'),labe
   const shot=async name=>{await pause(150);fs.writeFileSync(path.join(qa,name+'.png'),(await win.webContents.capturePage()).toPNG());};
   await until(()=>exists('#demo-role'),'entry');await js('document.querySelector("#demo-role").value="analyst"');await click('#demo-connect');
   await until(()=>exists('[data-analyst-tab=table]'),'analyst register');
-  assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(b=>b.innerText)'),['Реестр','Обмен','Показатели','Команда','Подключение']);
+  assert.deepEqual(await js('[...document.querySelectorAll("nav [data-section]")].map(b=>b.innerText)'),['Подключение','Реестр','Обмен','Показатели','Команда']);
   await until(()=>js('document.querySelector("#view").textContent.includes("Клиент Альфа")'),'native rows');await shot('01-registry');
   await click('#registry-open');await until(()=>exists('#card-edit'),'analyst card editor');
   await click('#card-edit');await until(()=>exists('[data-card-field=debt_today]'),'business fields');
