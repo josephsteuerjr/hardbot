@@ -337,7 +337,9 @@ export async function mountRoleEditor(
           <label>Территория<select data-access-territory="${index}"${readonly ? ' disabled' : ''}>${territoryOptions}</select></label>
           <label class="access-grant-employees" data-access-employees="${index}"${grant.territory === 'employees' ? '' : ' hidden'}>Сотрудники территории<select multiple data-access-employee="${index}"${readonly ? ' disabled' : ''}>${employeeOptions}</select></label>
         </div>${readonly ? '<p class="access-grant-readonly">Серверное полномочие показано только для чтения.</p>' : ''}</article>`;
-    }).join('') || '<p>Действующих полномочий нет. Добавьте первую пару роли и территории.</p>';
+    }).join('') || (accessModel === 1
+      ? '<p>Доступ действует по модели 1. Полномочия модели 2 ещё не настроены.</p>'
+      : '<p>Действующих полномочий нет. Добавьте первую пару роли и территории.</p>');
     host.querySelectorAll<HTMLButtonElement>('[data-access-remove]').forEach(button => {
       button.onclick = () => {
         if (busy) return;
@@ -455,6 +457,7 @@ export async function mountRoleEditor(
   }
 
   function applyList(data: any, repaint: boolean) {
+    if (Number.isInteger(data?.access_model)) accessModel = data.access_model;
     const grants = Array.isArray(data?.grants) ? data.grants : data?.normalized_grants;
     if (repaint && Array.isArray(grants)) {
       serverGrants = normalizeGrants(grants);
@@ -470,7 +473,6 @@ export async function mountRoleEditor(
     remoteWarnings = Array.isArray(data?.warnings) ? data.warnings.map(String) : [];
     if (typeof data?.can_manage === 'boolean') canManage = data.can_manage;
     if (typeof data?.manageable === 'boolean') canManage = data.manageable;
-    if (Number.isInteger(data?.access_model)) accessModel = data.access_model;
     renderWarnings();
     renderHistory();
     renderControls();
