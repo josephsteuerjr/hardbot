@@ -27,15 +27,13 @@ export async function mountConnection(host:HTMLElement,crm:any,boot:()=>Promise<
   const demo=synthetic?(choosingRole?'<section class="mobile-demo mobile-demo-entry" aria-label="Выбор роли"><h2>Выберите роль</h2>'+choices+'</section>':'<details class="mobile-demo"><summary>Сменить роль</summary>'+choices+'</details>'):'';
   const notice=connectionStatus(response,connected,pending);
   const status=notice?'<section class="mobile-connection-status" role="status"><span class="mobile-signal '+(notice.online?'online':'')+'"></span><div><strong>'+esc(notice.title)+'</strong><p>'+esc(notice.text)+'</p></div></section>':'';
-  const expiresAt=Number(response.data?.session?.expires_at||0);
-  const expiry=connected&&expiresAt?'<p class="mobile-session-expiry">Вход действует до '+esc(new Date(expiresAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}))+'. После этого войдите снова: черновики и очередь сохранятся.</p>':'';
   let queueText='';
   if(connected){
     const queue=await crm.queue().catch(()=>null),entries=queue?.data?.entries||[];
     const waiting=entries.filter((entry:any)=>entry.state==='pending').length,attention=entries.filter((entry:any)=>entry.state==='attention').length;
     queueText='<p class="mobile-queue-summary">'+(waiting||attention?'На этом телефоне: ожидают отправки — '+waiting+', требуют сверки — '+attention+'.':'Неподтверждённых отправок нет. Проверка выполнена только что.')+'</p>';
   }
-  host.innerHTML='<div class="mobile-connection">'+account+(choosingRole?demo:'')+status+expiry+queueText+(connected?'<button id="mobile-send" class="mobile-wide">Проверить и отправить очередь</button>':'')+(connected&&!synthetic?'<details class="mobile-diagnostics"><summary>Изменить пароль</summary>'+passwordForm()+'</details>':'')+(!choosingRole?demo:'')+'<details class="mobile-diagnostics"><summary>Диагностика</summary><p id="mobile-diagnostic-status"></p><button id="mobile-check">Проверить подключение</button></details><p id="mobile-connect-result" role="status" aria-live="polite"></p><small class="mobile-build">'+esc(state.version)+'</small></div>';
+  host.innerHTML='<div class="mobile-connection">'+account+(choosingRole?demo:'')+status+queueText+(connected?'<button id="mobile-send" class="mobile-wide">Проверить и отправить очередь</button>':'')+(connected&&!synthetic?'<details class="mobile-diagnostics"><summary>Изменить пароль</summary>'+passwordForm()+'</details>':'')+(!choosingRole?demo:'')+'<details class="mobile-diagnostics"><summary>Диагностика</summary><p id="mobile-diagnostic-status"></p><button id="mobile-check">Проверить подключение</button></details><p id="mobile-connect-result" role="status" aria-live="polite"></p><small class="mobile-build">'+esc(state.version)+'</small></div>';
   const root=host.firstElementChild!,feedback=host.querySelector<HTMLElement>('#mobile-connect-result')!;
   const safe=(fn:()=>Promise<any>)=>async()=>{try{feedback.textContent='';await fn();}catch(e){feedback.textContent=(e as Error).message;feedback.scrollIntoView({block:'nearest'});}};
   host.querySelectorAll<HTMLButtonElement>('[data-mobile-role]').forEach(b=>b.onclick=safe(async()=>{b.disabled=true;const r=await crm.connect({action:'synthetic',role:b.dataset.mobileRole});if(!r.ok){b.disabled=false;throw Error(r.text||'Вход не выполнен.');}}));

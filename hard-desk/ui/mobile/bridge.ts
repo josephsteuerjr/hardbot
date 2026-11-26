@@ -11,6 +11,9 @@ const canonical=(v:any):string=>JSON.stringify(v,(_,x)=>x&&typeof x==='object'&&
 const background=(work:Promise<any>)=>{void work.catch(()=>emit({type:'storage-error',text:'Не удалось сохранить данные на телефоне. Оставьте окно открытым и повторите действие.'}));};
 let current:any=null,csrf='',offline=false,flushing:Promise<any>|null=null,liveTimer:ReturnType<typeof setTimeout>,polling=false;
 let expiryTimer:ReturnType<typeof setTimeout>;
+let cacheTimer:ReturnType<typeof setTimeout>;
+let cacheReady:Promise<void>|undefined;
+let lastTouch=0;
 let queueRetryAt=0;
 let initializing:Promise<Reply>|null=null, legacyTried=false;
 let navigationTarget='';
@@ -62,6 +65,24 @@ const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('crm-mo
 const activity=new MobileActivity(api,async(action,body,owner)=>persistEntry(owner,action,body),()=>emit({type:'storage-error',text:'Не удалось сохранить активный интервал. Оставьте окно открытым и повторите подключение.'}));
 const emit=(event:any,broadcast=false)=>{for(const fn of listeners)fn(event);if(broadcast)channel?.postMessage(event);};
 channel?.addEventListener('message',event=>{if(event.data?.owner===current?.owner)emit(event.data);else if(event.data?.type==='identity')background(initialize().then(()=>emit({type:'identity'})));});
+async function checkReadCache(touch:boolean){
+  const state=await vault.maintainReadCache(touch);
+  clearTimeout(cacheTimer);
+  if(state.deadline)cacheTimer=setTimeout(()=>background(checkReadCache(false)),Math.max(0,state.deadline-Date.now()));
+  if(state.cleared&&current?.owner){
+    navigationTarget='connection';
+    emit({type:'identity',owner:current.owner},true);
+  }
+}
+function markReadCacheUse(event:Event){
+  if(document.hidden||!event.isTrusted)return;
+  const now=Date.now();
+  if(now>=lastTouch&&now-lastTouch<60_000)return;
+  lastTouch=now;
+  background(checkReadCache(true));
+}
+for(const event of ['pointerdown','keydown','wheel'])
+  window.addEventListener(event,markReadCacheUse,{capture:true,passive:true});
 function expireSession(){
   const expired=current;
   if(!expired?.owner||expired.expires_at>Date.now())return;
@@ -69,11 +90,18 @@ function expireSession(){
   background(vault.update(deviceScope,'last-state',saved=>saved?.owner===expired.owner&&saved.expires_at===expired.expires_at?null:saved));
   background(activity.stop());queueMicrotask(()=>emit({type:'identity'}));
 }
+function scheduleSessionExpiry(){
+  clearTimeout(expiryTimer);
+  if(!current?.owner)return;
+  const remaining=current.expires_at-Date.now();
+  if(remaining<=0){expireSession();return;}
+  expiryTimer=setTimeout(scheduleSessionExpiry,Math.min(remaining,2_147_483_647));
+}
 function authority(expected?:string){expireSession();if(!current?.owner||expected&&expected!==current.owner)throw Error('Вход изменился. Ввод сохранён у исходного сотрудника.');return current.owner;}
 async function revoke(status:number,expected=current?.owner){if(status===401&&expected&&current?.owner===expected){await vault.update(deviceScope,'last-state',saved=>saved?.owner===expected?null:saved);if(current?.owner!==expected)return;current=null;background(activity.stop());emit({type:'identity'});}}
 async function request(path:string,body?:any):Promise<Reply>{
   const startedOwner=current?.owner;
-  if(offline||!navigator.onLine)return {ok:false,status:0,text:'Нет связи. Данные сохранены на телефоне.'};
+  if(offline||!navigator.onLine)return {ok:false,status:0,text:'Нет связи. Неотправленные действия сохранены на телефоне.'};
   try{
     const response=await fetch('./'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
     const data=await response.json();
@@ -120,9 +148,12 @@ async function carryLegacyWork(previous:any,next:any){
 
 async function loadSession():Promise<Reply>{
   const previousOwner=current?.owner,previousScope=grantScope();
+  cacheReady??=checkReadCache(!document.hidden).catch(error=>{cacheReady=undefined;throw error;});
+  await cacheReady;
   if(!await vault.get(deviceScope,'installation')){
     await vault.update(deviceScope,'installation',value=>value||crypto.randomUUID());
   }
+  const savedBefore=await vault.get(deviceScope,'last-state');
   let response=await request('boot');
   if(response.ok){
     csrf=response.data.csrf;
@@ -140,17 +171,19 @@ async function loadSession():Promise<Reply>{
   if(response.ok){
     csrf=response.data.csrf;
     const next=response.data.session||null;
-    await carryLegacyWork(current||await vault.get(deviceScope,'last-state'),next);
+    await carryLegacyWork(current||savedBefore,next);
     current=next;
     await vault.put(deviceScope,'last-state',current);
   }
-  else if(response.status===0){
+  else if(response.status===0||response.status>=500){
     const saved=await vault.get(deviceScope,'last-state');
     current=saved&&saved.expires_at>Date.now()&&saved.context?.source!=='legacy-analyst-web'?saved:null;
+  }else if([401,410].includes(response.status)&&savedBefore?.owner){
+    await vault.update(deviceScope,'last-state',saved=>
+      saved?.owner===savedBefore.owner&&saved.expires_at===savedBefore.expires_at?null:saved);
   }
   if(current?.owner&&current.owner===previousOwner&&grantScope()!==previousScope)await vault.clearReads(current.owner);
-  clearTimeout(expiryTimer);
-  if(current?.owner)expiryTimer=setTimeout(expireSession,Math.max(0,current.expires_at-Date.now()));
+  scheduleSessionExpiry();
   if(current?.owner&&response.ok&&!document.hidden&&current.context?.source!=='legacy-analyst-web')
     await activity.start(current.owner,await vault.get(deviceScope,'installation'));
   else if(!current||current.context?.source==='legacy-analyst-web')await activity.stop();
@@ -168,7 +201,7 @@ async function api(method:string,action:string,body?:any,query?:any,recoverLegac
   if(exportKey){if(response.ok)await vault.put(owner,'export-key:'+operation+response.data.manifest.export_id,exportKey);else if([400,409,422].includes(response.status))await vault.put(owner,exportKey,null);}
   if(current?.owner!==owner)return {ok:false,status:401,text:'Вход изменился.'};
   if(method==='GET'&&response.ok&&action!=='operator-status')await vault.put(owner,key,{at:new Date().toISOString(),data:response.data});
-  if(method==='GET'&&response.status===0&&!['operator-status','changes','assignment-job','assignment-receipt'].includes(action)){
+  if(method==='GET'&&(response.status===0||response.status>=500)&&!['operator-status','changes','assignment-job','assignment-receipt'].includes(action)){
     const saved=await vault.get(owner,key);if(saved)return {ok:true,status:200,data:saved.data,stale:saved.at};
   }
   return response;
@@ -492,4 +525,6 @@ export const bridge:any={
   },
 };
 window.addEventListener('online',()=>{background(initialize().then(()=>flush()));});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)background(initialize().then(()=>flush()));});
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden)background(checkReadCache(true).then(()=>initialize()).then(()=>flush()));
+});

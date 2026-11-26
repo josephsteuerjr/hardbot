@@ -26,7 +26,7 @@ def browser_checks(url, qa):
         page.wait_for_timeout(1000)
         page.screenshot(path=str(qa / 'connection-debug.png'), full_page=True)
         page.locator('.mobile-connection-status strong').filter(has_text='Связь есть').wait_for(timeout=5000)
-        assert 'Вход действует до' in page.locator('.mobile-session-expiry').inner_text()
+        assert page.locator('.mobile-session-expiry').count() == 0
         assert 'Неподтверждённых отправок нет' in page.locator('.mobile-queue-summary').inner_text()
         page.wait_for_function('navigator.serviceWorker && navigator.serviceWorker.controller')
         page.screenshot(path=str(qa / 'connection-online.png'), full_page=True)
@@ -59,14 +59,13 @@ def browser_checks(url, qa):
         assert not errors, errors
         browser.close()
         return {'passed': True, 'errors': errors,
-                'checks': ['online session deadline and queue summary', 'cold offline status',
+                'checks': ['online sign-in status and queue summary', 'cold offline status',
                            'server 503 preserves work guidance', '401 requires same-user sign-in',
                            'recovery after network restoration']}
 
 
 async def main(qa):
     backend = SyntheticBackend(qa / 'synthetic')
-    await backend.start()
     mobile_server.ASSETS = qa / 'web'
     server = TestServer(mobile_server.create_app(backend, qa / 'data', key=os.urandom(32)))
     await server.start_server()

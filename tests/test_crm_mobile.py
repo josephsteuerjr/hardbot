@@ -4,9 +4,11 @@ from datetime import datetime,timezone
 import sqlite3
 import uuid
 import os,time,pytest
+from types import SimpleNamespace
 import aiohttp
 from aiohttp.test_utils import TestClient,TestServer
 from crm.mobile_backend import SyntheticBackend
+from crm import mobile_server
 from crm.mobile_server import create_app
 from crm.mobile_server import Sessions
 from crm.contract import CRMError
@@ -45,34 +47,34 @@ def test_cookie_csrf_origin_and_client_role_cannot_elevate(tmp_path):
             assert (await client.post('/mobile/admin',headers=headers,json={'action':'local','args':['/profile',{}]})).status==403
     asyncio.run(run())
 
-def test_mobile_session_absolute_deadline_and_existing_session_upgrade(tmp_path):
+def test_authenticated_mobile_login_survives_two_idle_days_and_upgrades_existing_cookie(tmp_path,monkeypatch):
+    clock=[time.time()]
+    monkeypatch.setattr(mobile_server,'time',SimpleNamespace(time=lambda:clock[0]))
     async def run():
         backend=SyntheticBackend(tmp_path/'synthetic')
         app=create_app(backend,tmp_path/'mobile')
         async with TestClient(TestServer(app)) as client:
             boot=await (await client.get('/mobile/boot')).json()
-            before=int(time.time()*1000)
             response=await client.post('/mobile/login',headers={'X-CRM-CSRF':boot['csrf']},
                                        json={'action':'synthetic','role':'employee'})
-            assert response.status==200 and int(response.cookies['crm_mobile_v1']['max-age']) in {172799,172800}
+            duration=mobile_server.LOGIN_COOKIE_SECONDS
+            assert response.status==200 and int(response.cookies['crm_mobile_v1']['max-age'])==duration
             sid=response.cookies['crm_mobile_v1'].value
             sessions=app['mobile_sessions']
             current=sessions.read(sid)
-            assert before+48*3600*1000<=current['expires_at']<=int(time.time()*1000)+48*3600*1000
-            current.pop('lifetime_seconds')
-            current['expires_at']-=40*3600*1000
+            assert current['expires_at']==int((clock[0]+duration)*1000)
+            current.update(lifetime_seconds=48*3600,expires_at=int((clock[0]+60)*1000))
             sessions.write(current,sid)
-            cutoff=current['expires_at']+40*3600*1000
-            for _ in range(2):
+            for elapsed in (0,48*3600+1):
+                clock[0]+=elapsed
                 response=await client.get('/mobile/boot')
-                state=(await response.json())['session']
-                assert state['expires_at']==cutoff and state['owner']==current['owner']
-            assert sessions.read(sid)['lifetime_seconds']==48*3600
-            current=sessions.read(sid)
-            current['expires_at']=int(time.time()*1000)-1
-            sessions.write(current,sid)
+                boot=await response.json()
+                assert boot['session']['owner']==current['owner']
+                assert boot['session']['expires_at']==int((clock[0]+duration)*1000)
+                assert response.cookies['crm_mobile_v1'].value==sid
+            response=await client.post('/mobile/logout',headers={'X-CRM-CSRF':boot['csrf']},json={})
+            assert response.status==200 and sessions.read(sid) is None
             assert (await (await client.get('/mobile/boot')).json())['session'] is None
-            assert sessions.read(sid) is None
     asyncio.run(run())
 
 

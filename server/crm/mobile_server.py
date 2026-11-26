@@ -14,8 +14,9 @@ from .mobile_backend import (SyntheticBackend, SharedBackend, WindowsExecutor, S
 PREFIX='/mobile/'
 COOKIE='crm_mobile_v1'
 ASSETS=Path(__file__).resolve().parents[1]/'miniapp/crm'
-SESSION_SECONDS=48*3600
-LEGACY_SESSION_SECONDS=8*3600
+LOGIN_COOKIE_SECONDS=365*24*3600
+PENDING_SECONDS=48*3600
+ANONYMOUS_SECONDS=8*3600
 
 class Sessions:
     def __init__(self,home,key,source_roots=()):
@@ -146,8 +147,10 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         remaining=max(0,(session['expires_at']-int(time.time()*1000)+999)//1000)
         response.set_cookie(COOKIE,sid,httponly=True,secure=bool(public_origin and public_origin.startswith('https:') or request.secure),
                             samesite='Strict',path=prefix,max_age=remaining)
-    def empty(seconds=SESSION_SECONDS):
-        return dict(csrf=secrets.token_urlsafe(32),expires_at=int((time.time()+seconds)*1000),lifetime_seconds=seconds)
+    def empty(seconds=PENDING_SECONDS):
+        return dict(csrf=secrets.token_urlsafe(32),expires_at=int((time.time()+seconds)*1000))
+    def keep_login(session):
+        session['expires_at']=int((time.time()+LOGIN_COOKIE_SECONDS)*1000)
     def bind_owner(session):
         context=session['context']
         origin='synthetic://'+str(home) if backend.synthetic else public_origin or backend.crm
@@ -183,21 +186,18 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         session['role']=context['role']
         session['context']=context
         bind_owner(session)
-        upgraded=False
-        if 'lifetime_seconds' not in session:
-            session['expires_at']+=(SESSION_SECONDS-LEGACY_SESSION_SECONDS)*1000
-            session['lifetime_seconds']=SESSION_SECONDS
-            upgraded=True
-        if upgraded or replaced or previous_owner!=session['owner']:
+        if replaced or previous_owner!=session['owner']:
             sessions.write(session,request['mobile_sid'])
         return session
     async def boot(request):
-        session=request['mobile_session'] or empty(LEGACY_SESSION_SECONDS)
+        session=request['mobile_session'] or empty(ANONYMOUS_SECONDS)
         if session.get('pending') and session['pending']['status']!='password':
             try:await backend.activate(session);bind_owner(session)
             except CRMError as exc:
                 if exc.status not in {401,403,410}:raise
-        if session.get('owner'):session=await authorize(request)
+        if session.get('owner'):
+            session=await authorize(request)
+            keep_login(session)
         sid=sessions.write(session,request['mobile_sid'] if request['mobile_session'] else None)
         public={k:session[k] for k in ('owner','context','synthetic','expires_at') if k in session}
         response=web.json_response(dict(csrf=session['csrf'],session=public if session.get('owner') else None,pending=session.get('pending'),synthetic=backend.synthetic))
@@ -205,7 +205,9 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
     async def login(request):
         body=await request.json();session=await backend.login(body)
         session.update(empty())
-        if not session.get('pending'):bind_owner(session)
+        if not session.get('pending'):
+            bind_owner(session)
+            keep_login(session)
         sid=sessions.write(session,replaces=request['mobile_sid'])
         response=web.json_response(dict(ok=True));cookie(response,sid,request,session);return response
     async def registration(request):
@@ -234,6 +236,7 @@ def create_app(backend,home,*,key=None,public_origin=None,source_roots=(),prefix
         session = await backend.resume(body['credential'], body['entry_role'])
         session.update(empty())
         bind_owner(session)
+        keep_login(session)
         response = web.json_response(dict(ok=True))
         cookie(response, sessions.write(session, replaces=request['mobile_sid']), request, session)
         return response

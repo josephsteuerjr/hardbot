@@ -1,5 +1,9 @@
 /** Origin-local encrypted records. CAS keeps concurrent tabs from losing work. */
 type RecordValue={revision:number;iv:Uint8Array;cipher:ArrayBuffer};
+const READ_CACHE_ACTIVITY='read-cache-last-use';
+const READ_CACHE_MS=48*60*60*1000;
+const readCacheDeadline=(last:number,now:number)=>Number.isFinite(last)&&last>0&&last<=now&&now-last<READ_CACHE_MS
+  ? last+READ_CACHE_MS : 0;
 let opening:Promise<IDBDatabase>;
 function database(){return opening??=new Promise<IDBDatabase>((resolve,reject)=>{
   const request=indexedDB.open('rimborso-crm-mobile-v1',1);
@@ -24,6 +28,13 @@ async function decode(record:RecordValue|undefined,id:string){
 }
 export async function get(owner:string,name:string){
   const id=await address(owner,name),db=await database();
+  if(name.startsWith('read:')){
+    const last=await result(db.transaction('keys').objectStore('keys').get(READ_CACHE_ACTIVITY));
+    if(!readCacheDeadline(last,Date.now())){
+      await maintainReadCache(false);
+      return null;
+    }
+  }
   const record=await result(db.transaction('vault').objectStore('vault').get(id));
   if(record)return decode(record,id);
   // Preserve and atomically re-address records from the internal early candidate.
@@ -46,19 +57,60 @@ export function update(owner:string,name:string,change:(value:any)=>any){
 }
 async function updateRecord(owner:string,name:string,change:(value:any)=>any){
   const id=await address(owner,name),legacy=owner+'\n'+name,db=await database();
+  const cache=name.startsWith('read:');
   for(let attempt=0;attempt<20;attempt++){
     const before=await result(db.transaction('vault').objectStore('vault').get(id)) as RecordValue|undefined;
     const old=before?null:await result(db.transaction('vault').objectStore('vault').get(legacy));
     const value=change(await decode(before||old,before?id:legacy)),iv=crypto.getRandomValues(new Uint8Array(12));
     const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:new TextEncoder().encode(location.origin+'\n'+id)},await key(),new TextEncoder().encode(JSON.stringify(value)));
-    const tx=db.transaction('vault','readwrite'),done=complete(tx);let conflict=false;
-    const read=tx.objectStore('vault').get(id);
-    read.onsuccess=()=>{if((read.result?.revision||0)!==(before?.revision||0)){conflict=true;tx.abort();}else{tx.objectStore('vault').put({revision:(before?.revision||0)+1,iv,cipher},id);if(old)tx.objectStore('vault').delete(legacy);}};
+    const tx=db.transaction(cache?['vault','keys']:['vault'],'readwrite'),done=complete(tx);let conflict=false;
+    const records=tx.objectStore('vault');
+    const write=()=>{
+      const read=records.get(id);
+      read.onsuccess=()=>{
+        if((read.result?.revision||0)!==(before?.revision||0)){conflict=true;tx.abort();return;}
+        records.put({revision:(before?.revision||0)+1,iv,cipher},id);
+        if(old)records.delete(legacy);
+      };
+    };
+    if(cache){
+      const activity=tx.objectStore('keys').get(READ_CACHE_ACTIVITY);
+      activity.onsuccess=()=>{if(readCacheDeadline(activity.result,Date.now()))write();};
+    }else write();
     try{await done;return value;}catch(error){if(!conflict)throw error;}
   }
   throw Error('Данные меняются в другой вкладке. Повторите сохранение.');
 }
 export const put=(owner:string,name:string,value:any)=>update(owner,name,()=>value);
+
+/** The phone keeps unsent work and its login when re-downloadable reads age out. */
+export async function maintainReadCache(touch:boolean){
+  const db=await database(),tx=db.transaction(['keys','vault'],'readwrite'),done=complete(tx);
+  const keys=tx.objectStore('keys'),records=tx.objectStore('vault');
+  const activity=keys.get(READ_CACHE_ACTIVITY);
+  let deadline=0,cleared=false;
+  activity.onsuccess=()=>{
+    const last=activity.result,now=Date.now();
+    deadline=readCacheDeadline(last,now);
+    cleared=!deadline;
+    if(!deadline&&last!==0){
+      const scan=records.openKeyCursor();
+      scan.onsuccess=()=>{
+        const entry=scan.result;
+        if(!entry)return;
+        if(String(entry.key).split('\n',2)[1]?.startsWith('read:'))records.delete(entry.key);
+        entry.continue();
+      };
+      if(!touch)keys.put(0,READ_CACHE_ACTIVITY);
+    }
+    if(touch){
+      keys.put(now,READ_CACHE_ACTIVITY);
+      deadline=now+READ_CACHE_MS;
+    }
+  };
+  await done;
+  return {deadline,cleared};
+}
 
 const photoPrefix=async(owner:string,form:string)=>(await address(owner,'visit-photos:'+form))+':';
 export function stagePhotoFiles(owner:string,form:string,contract:string,files:File[]){
