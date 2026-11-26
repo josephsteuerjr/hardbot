@@ -6,6 +6,9 @@ import {MobileActivity} from './activity';
 import {grantLabel} from '../workspace/grant-label';
 type Reply={ok:boolean;status:number;data?:any;text?:string;stale?:string;cancelled?:boolean;retryAt?:number};
 type Entry={action:string;body:any;queued_at:string;state:'pending'|'attention'|'accepted';result?:any;error?:string;code?:string;sha256?:string;grant_id?:string|null;actor_uid?:string|number;access_model?:number;recover_legacy_receipt?:boolean};
+const cachedReadTimeout=3500,startupReadTimeout=10000;
+const initialReads=new Set(['context','portfolio','work-portfolio','card']);
+const onlineReads=new Set(['operator-status','changes','assignment-job','assignment-receipt']);
 const listeners=new Set<(event:any)=>void>();
 const canonical=(v:any):string=>JSON.stringify(v,(_,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 const background=(work:Promise<any>)=>{void work.catch(()=>emit({type:'storage-error',text:'Не удалось сохранить данные на телефоне. Оставьте окно открытым и повторите действие.'}));};
@@ -118,11 +121,11 @@ async function revokeWorkspace(owner:string,duringBoot:boolean){
   await vault.clearReads(owner);
   channel?.postMessage({type:'workspace-revoked',owner});
 }
-async function request(path:string,body?:any):Promise<Reply>{
+async function request(path:string,body?:any,timeout=120000):Promise<Reply>{
   const startedOwner=current?.owner;
   if(offline||!navigator.onLine)return {ok:false,status:0,text:'Нет связи. Неотправленные действия сохранены на телефоне.'};
   try{
-    const response=await fetch('./'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
+    const response=await fetch('./'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CRM-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(timeout)});
     const data=await response.json();
     if(current?.owner!==startedOwner)return {ok:false,status:401,text:'Вход изменился. Исходная работа сохранена.'};
     const revokedOwner=data.revoked_owner||
@@ -178,7 +181,9 @@ async function loadSession():Promise<Reply>{
   }
   const savedBefore=await vault.get(deviceScope,'last-state');
   const checkedAt=Date.now();
-  let response=await request('boot');
+  // Safari can report an online connection while the API is unreachable.
+  const waitForBoot=savedBefore?.owner&&savedBefore.expires_at>checkedAt?cachedReadTimeout:startupReadTimeout;
+  let response=await request('boot',undefined,waitForBoot);
   if(response.ok){
     csrf=response.data.csrf;
     if(!legacyTried&&!response.data.synthetic&&!response.data.session&&!response.data.pending){
@@ -187,7 +192,7 @@ async function loadSession():Promise<Reply>{
         if(credential&&entry_role){
           const resumed=await request('resume',{credential,entry_role});
           legacyTried=resumed.ok||[400,401,403,410].includes(resumed.status);
-          if(resumed.ok||resumed.status===409)response=await request('boot');
+          if(resumed.ok||resumed.status===409)response=await request('boot',undefined,startupReadTimeout);
         }
       }catch{/* Session access stays available when local storage is restricted. */}
     }
@@ -225,17 +230,21 @@ async function loadSession():Promise<Reply>{
 }
 async function api(method:string,action:string,body?:any,query?:any,recoverLegacyReceipt=false):Promise<Reply>{
   const owner=authority(),requestedGrant=grantId(),scope=current.context?.access_model===2?grantScope()+':':'',operation=current.context?.access_model===2?operationScope()+':':'',key='read:'+scope+action+':'+JSON.stringify(query||{});
+  const canReadCache=method==='GET'&&!onlineReads.has(action);
+  const hasCachedRead=canReadCache&&await vault.get(owner,key).catch(()=>null);
+  if(current?.owner!==owner)return {ok:false,status:401,text:'Вход изменился.'};
+  const waitForRead=hasCachedRead?cachedReadTimeout:canReadCache&&initialReads.has(action)?startupReadTimeout:undefined;
   let exportKey='';
   if(method==='POST'&&action==='export'){
     const {operation_id,...selection}=body;exportKey='export-intent:'+operation+canonical(selection);
     const prior=await vault.get(owner,exportKey);if(prior)body=prior;else await vault.put(owner,exportKey,body);
   }
   const response=await request('api',{method,action,body:body||{},query:query||{},...(requestedGrant!==null?{grant_id:requestedGrant}:{}),
-    ...(recoverLegacyReceipt?{recover_legacy_receipt:true}:{})});
+    ...(recoverLegacyReceipt?{recover_legacy_receipt:true}:{})},waitForRead);
   if(exportKey){if(response.ok)await vault.put(owner,'export-key:'+operation+response.data.manifest.export_id,exportKey);else if([400,409,422].includes(response.status))await vault.put(owner,exportKey,null);}
   if(current?.owner!==owner)return {ok:false,status:401,text:'Вход изменился.'};
   if(method==='GET'&&response.ok&&action!=='operator-status')await vault.put(owner,key,{at:new Date().toISOString(),data:response.data});
-  if(method==='GET'&&(response.status===0||response.status>=500)&&!['operator-status','changes','assignment-job','assignment-receipt'].includes(action)){
+  if(canReadCache&&(response.status===0||response.status>=500)){
     const saved=await vault.get(owner,key);if(saved)return {ok:true,status:200,data:saved.data,stale:saved.at};
   }
   return response;
